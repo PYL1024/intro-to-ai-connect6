@@ -1,0 +1,27 @@
+# IntelliJ IDEA
+.idea/
+*.iml
+out/
+gen/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# OS
+.DS_Store# IntelliJ IDEA
+.idea/
+*.iml
+out/
+gen/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# OS
+.DS_Store
