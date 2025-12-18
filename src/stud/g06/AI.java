@@ -1,4 +1,4 @@
-package stud.g99;
+package stud.g06;
 
 import core.board.Board;
 import core.board.PieceColor;

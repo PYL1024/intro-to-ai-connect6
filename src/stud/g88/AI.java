@@ -4,60 +4,61 @@ import core.board.Board;
 import core.board.PieceColor;
 import core.game.Game;
 import core.game.Move;
-
-import java.util.ArrayList;
+//import core.player.AI;
+import stud.util.ShuffleUtil;
 import java.util.List;
-import java.util.Random;
 
 public class AI extends core.player.AI {
     private int steps = 0;
     private static final int BOARD_SIZE = 19;
-    private static final int MAX_INDEX = BOARD_SIZE * BOARD_SIZE - 1;
-
-    // 8¸ö·½ÏòµÄÆ«ÒÆÁ¿£¨ÉÏ¡¢ÏÂ¡¢×ó¡¢ÓÒ¡¢ËÄ¸ö¶Ô½ÇÏß£©
     private static final int[] DX = {-1, -1, -1, 0, 0, 1, 1, 1};
     private static final int[] DY = {-1, 0, 1, -1, 1, -1, 0, 1};
 
     @Override
     public Move findNextMove(Move opponentMove) {
         this.board.makeMove(opponentMove);
-        Random rand = new Random();
 
-        // Ëæ»úÑ¡ÔñµÚÒ»¸ö×ÓµÄÎ»ÖÃ
-        int index1;
-        do {
-            index1 = rand.nextInt(MAX_INDEX + 1);
-        } while (this.board.get(index1) != PieceColor.EMPTY);
+        // 1. å¯¹å…¨å±€ä½ç½®æ´—ç‰Œ
+        List<Integer> globalShuffled = ShuffleUtil.shuffleGlobalPositions(BOARD_SIZE);
 
-        // ¼ÆËãµÚÒ»¸ö×ÓµÄ×ø±ê
+        // 2. é€‰ç¬¬ä¸€ä¸ªç©ºä½ä½œä¸ºç¬¬ä¸€ä¸ªè½å­
+        Integer index1 = null;
+        for (int pos : globalShuffled) {
+            if (this.board.get(pos) == PieceColor.EMPTY) {
+                index1 = pos;
+                break;
+            }
+        }
+        if (index1 == null) return null;
+
+        // 3. è®¡ç®—ç›¸é‚»3x3åŒºåŸŸçš„ç´¢å¼•èŒƒå›´å¹¶æ´—ç‰Œ
         int x1 = index1 / BOARD_SIZE;
         int y1 = index1 % BOARD_SIZE;
+        int minX = Math.max(0, x1 - 1);
+        int maxX = Math.min(BOARD_SIZE - 1, x1 + 1);
+        int minY = Math.max(0, y1 - 1);
+        int maxY = Math.min(BOARD_SIZE - 1, y1 + 1);
+        int startIndex = minX * BOARD_SIZE + minY;
+        int endIndex = maxX * BOARD_SIZE + maxY;
+        List<Integer> adjacentShuffled = ShuffleUtil.shufflePositions(startIndex, endIndex, BOARD_SIZE);
 
-        // ²éÕÒÏàÁÚµÄ¿ÕÎ»
-        List<Integer> adjacentEmpty = new ArrayList<>();
-        for (int i = 0; i < 8; i++) {
-            int x2 = x1 + DX[i];
-            int y2 = y1 + DY[i];
-
-            // ¼ì²éÊÇ·ñÔÚÆåÅÌ·¶Î§ÄÚ
-            if (x2 >= 0 && x2 < BOARD_SIZE && y2 >= 0 && y2 < BOARD_SIZE) {
-                int index2 = x2 * BOARD_SIZE + y2;
-                if (this.board.get(index2) == PieceColor.EMPTY) {
-                    adjacentEmpty.add(index2);
-                }
+        // 4. ä»ç›¸é‚»æ´—ç‰Œåˆ—è¡¨é€‰ç¬¬äºŒä¸ªè½å­
+        Integer index2 = null;
+        for (int pos : adjacentShuffled) {
+            if (pos != index1 && this.board.get(pos) == PieceColor.EMPTY) {
+                index2 = pos;
+                break;
             }
         }
 
-        // Ñ¡ÔñµÚ¶ş¸ö×ÓµÄÎ»ÖÃ
-        int index2;
-        if (!adjacentEmpty.isEmpty()) {
-            // ÓĞÏàÁÚ¿ÕÎ»£¬Ëæ»úÑ¡ÔñÒ»¸ö
-            index2 = adjacentEmpty.get(rand.nextInt(adjacentEmpty.size()));
-        } else {
-            // ÎŞÏàÁÚ¿ÕÎ»£¬ÔÚÕû¸öÆåÅÌËæ»úÑ¡Ôñ
-            do {
-                index2 = rand.nextInt(MAX_INDEX + 1);
-            } while (index2 == index1 || this.board.get(index2) != PieceColor.EMPTY);
+        // 5. ç›¸é‚»æ— ç©ºä½åˆ™ä»å…¨å±€é€‰
+        if (index2 == null) {
+            for (int pos : globalShuffled) {
+                if (pos != index1 && this.board.get(pos) == PieceColor.EMPTY) {
+                    index2 = pos;
+                    break;
+                }
+            }
         }
 
         Move move = new Move(index1, index2);

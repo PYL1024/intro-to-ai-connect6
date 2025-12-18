@@ -15,7 +15,7 @@ public class AITester {
     public static void main(String[] args) throws CloneNotSupportedException {
         StopwatchCPU timer = new StopwatchCPU();
         zeroCarnival(); //随机棋手大狂欢
-//        oucLeague(); //海之子联赛
+        //oucLeague(); //海之子联赛
         //oneMatch();    //自组织一场比赛（两个棋手先后手各下一局，共下两局棋）
         double elapsedTime = timer.elapsedTime();
         System.out.printf("%.4f", elapsedTime);

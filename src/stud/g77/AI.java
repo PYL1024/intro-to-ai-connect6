@@ -14,16 +14,16 @@ public class AI extends core.player.AI {
 
     @Override
     public Move findNextMove(Move opponentMove) {
-        // ¼ÇÂ¼¶ÔÊÖµÄ×ß·¨
+        // è®°å½•å¯¹æ‰‹çš„èµ°æ³•
         this.board.makeMove(opponentMove);
         Random rand = new Random();
 
-        // ÔÚ19*19ÆåÅÌ·¶Î§ÄÚËæ»úÑ¡ÔñÁ½¸ö²»Í¬µÄ¿ÕÎ»
+        // åœ¨19*19æ£‹ç›˜èŒƒå›´å†…éšæœºé€‰æ‹©ä¸¤ä¸ªä¸åŒçš„ç©ºä½
         while (true) {
             int index1 = rand.nextInt(MAX_INDEX + 1);
             int index2 = rand.nextInt(MAX_INDEX + 1);
 
-            // ¼ì²éÁ½¸öÎ»ÖÃÊÇ·ñ¶¼ÊÇ¿ÕÎ»ÇÒ²»ÏàÍ¬
+            // æ£€æŸ¥ä¸¤ä¸ªä½ç½®æ˜¯å¦éƒ½æ˜¯ç©ºä½ä¸”ä¸ç›¸åŒ
             if (index1 != index2 &&
                     this.board.get(index1) == PieceColor.EMPTY &&
                     this.board.get(index2) == PieceColor.EMPTY) {
