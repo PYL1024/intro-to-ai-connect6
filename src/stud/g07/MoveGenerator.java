@@ -1,4 +1,4 @@
-package stud.g06;
+package stud.g07;
 
 import core.board.PieceColor;
 
@@ -6,14 +6,14 @@ import java.util.*;
 
 /**
  * 着法生成器
- * <p>
+ * 
  * 负责生成和排序候选着法，是AI决策的核心组件之一。
- * <p>
+ * 
  * 【设计思想】
  * 1. 基于"路"的概念，优先考虑能形成/破坏关键棋型的位置
  * 2. 使用候选位置集合，避免全盘扫描
  * 3. 支持着法排序，为V2阶段的α-β剪枝提供支持
- * <p>
+ * 
  * 【着法优先级】
  * 1. 胜着（能直接获胜的着法）
  * 2. 防守着法（阻止对手获胜）
@@ -57,7 +57,7 @@ public class MoveGenerator {
     /**
      * 【胜着检测核心算法】
      * 检测是否存在能让己方直接获胜的着法
-     * <p>
+     * 
      * 伪代码：
      * ```
      * function findWinningMove(board, myColor):
@@ -69,7 +69,7 @@ public class MoveGenerator {
      * for each pos2 in candidates:
      * if pos2 != pos1:
      * return (pos1, pos2)
-     * <p>
+     * 
      * // 检查双子组合胜着
      * for each pos2 in candidates:
      * if pos2 > pos1: // 避免重复检查
@@ -121,9 +121,9 @@ public class MoveGenerator {
         return null;
     }
 
-    /*
-      检查两子组合是否能获胜
-      查找两个位置，落子后能形成连六
+    /**
+     * 检查两子组合是否能获胜
+     * 查找两个位置，落子后能形成连六
      */
     // findTwoStoneWin/canFormFive 已由直接双点模拟替代
 
@@ -132,7 +132,7 @@ public class MoveGenerator {
     /**
      * 【着法生成核心算法】
      * 生成并排序所有候选着法
-     * <p>
+     * 
      * 伪代码：
      * ```
      * function generateMoves(board, myColor, oppColor):
@@ -140,21 +140,21 @@ public class MoveGenerator {
      * winMove = findWinningMove(myColor)
      * if winMove != null:
      * return [winMove]
-     * <p>
+     * 
      * // 2. 检查防守
      * defensePositions = threatEvaluator.getDefensePositions(oppColor)
      * if defensePositions is urgent:
      * return generateDefenseMoves(defensePositions)
-     * <p>
+     * 
      * // 3. 生成进攻着法
      * candidates = []
      * for each pos in board.candidatePositions:
      * score = evaluatePosition(pos, myColor, oppColor)
      * candidates.add((pos, score))
-     * <p>
+     * 
      * // 4. 按分值排序
      * sort(candidates, by score descending)
-     * <p>
+     * 
      * // 5. 组合成双子着法
      * return combineMoves(candidates)
      * ```
@@ -221,7 +221,6 @@ public class MoveGenerator {
 
     /**
      * 评估单个位置的分值
-     * 【Step 4 优化】优先使用路表增量评估
      * 
      * @param pos      位置
      * @param myColor  己方颜色
@@ -236,17 +235,11 @@ public class MoveGenerator {
         // 1. 位置分（中心高）
         score += POSITION_SCORE[row][col];
 
-        // 2. 使用路表增量评估（Step 4 优化）
-        if (board.isLinesBuilt()) {
-            // 基于路表的快速增量评估
-            score += board.evaluateMoveIncrement(pos, myColor) * 2;
-            // 对方视角的增量（防守价值）
-            score += board.evaluateMoveIncrement(pos, oppColor);
-        } else {
-            // 回退到V1的四向扫描评估
-            score += board.evaluatePositionScore(pos, myColor) * 2;
-            score += board.evaluatePositionScore(pos, oppColor);
-        }
+        // 2. 进攻分（己方棋型）
+        score += board.evaluatePositionScore(pos, myColor) * 2;
+
+        // 3. 防守分（破坏对方棋型）
+        score += board.evaluatePositionScore(pos, oppColor);
 
         return score;
     }

@@ -15,8 +15,8 @@ public class AITester {
     public static void main(String[] args) throws CloneNotSupportedException {
         StopwatchCPU timer = new StopwatchCPU();
         zeroCarnival(); // 随机棋手大狂欢
-        // oucLeague(); //海之子联赛
-        // oneMatch(); //自组织一场比赛（两个棋手先后手各下一局，共下两局棋）
+//         oucLeague(); //海之子联赛
+//         oneMatch(); //自组织一场比赛（两个棋手先后手各下一局，共下两局棋）
         double elapsedTime = timer.elapsedTime();
         System.out.printf("%.4f", elapsedTime);
     }
@@ -45,9 +45,10 @@ public class AITester {
     private static ArrayList<Player> createPlayers() {
         ArrayList<Player> players = new ArrayList<>();
         players.add(new stud.g06.AI());
-        players.add(new stud.g88.AI());
-        players.add(new stud.g77.AI());
-        players.add(new stud.g99.AI());
+        players.add(new stud.g07.AI());
+//        players.add(new stud.g88.AI());
+//        players.add(new stud.g77.AI());
+//        players.add(new stud.g99.AI());
         return players;
     }
 

@@ -1,4 +1,4 @@
-package stud.g06;
+package stud.g07;
 
 import core.board.PieceColor;
 
@@ -7,14 +7,14 @@ import java.util.List;
 
 /**
  * 威胁评估器
- * <p>
+ * 
  * 负责检测和评估棋盘上的威胁情况，是V1阶段防守策略的核心。
- * <p>
+ * 
  * 【威胁定义】
  * - 致命威胁(Critical)：对方冲四或活四，必须立即防守
  * - 高威胁(High)：对方活三，需要优先防守
  * - 中威胁(Medium)：对方眠三，需要关注
- * <p>
+ * 
  * 【防守策略】
  * 1. 威胁数 ≤ 2：必须防守所有威胁
  * 2. 威胁数 > 2：按优先级选择防守（先防致命，再防高威胁）
@@ -101,7 +101,7 @@ public class ThreatEvaluator {
     /**
      * 【威胁检测核心算法】
      * 扫描整个棋盘，检测对手的所有威胁
-     * <p>
+     * 
      * 伪代码：
      * ```
      * function detectThreats(board, oppColor):
@@ -366,7 +366,7 @@ public class ThreatEvaluator {
     /**
      * 【防守策略核心算法】
      * 根据威胁情况决定防守位置
-     * <p>
+     * 
      * 策略：
      * 1. 如果有致命威胁（冲四、活四），必须优先防守
      * 2. 威胁数 ≤ 2 时，防守所有威胁
