@@ -50,8 +50,8 @@ public class AI extends core.player.AI {
     /** TBS搜索最大深度（以我方着法层计） */
     private static final int TBS_MAX_DEPTH = 6;
 
-    /** TBS单步时间预算（毫秒） */
-    private static final long TBS_TIME_LIMIT_MS = 700;
+    /** TBS默认时间预算（毫秒） */
+    private static final long TBS_DEFAULT_TIME_LIMIT_MS = 700;
 
     // ===================== 成员变量 =====================
 
@@ -72,10 +72,14 @@ public class AI extends core.player.AI {
     /** 共享置换表（评估缓存） */
     private TranspositionTable transpositionTable;
 
-    /** 是否启用MCTS */
-    private static final boolean USE_MCTS = true;
-    /** MCTS 时间预算（毫秒） */
-    private static final long MCTS_TIME_LIMIT_MS = 600;
+    /** 是否启用MCTS（策略可调整） */
+    private boolean useMCTS = true;
+    /** MCTS 时间预算（毫秒，策略可调整） */
+    private int mctsTimeLimitMs = 600;
+    /** TBS 时间预算（毫秒，可配置） */
+    private long tbsTimeLimitMs = TBS_DEFAULT_TIME_LIMIT_MS;
+    /** 当前策略ID（用于奖励反馈） */
+    private int currentStrategyId = -1;
 
     // 简易搜索日志已移除
 
@@ -85,8 +89,6 @@ public class AI extends core.player.AI {
     /** 对方颜色 */
     private PieceColor oppColor;
 
-    /** 是否为第一步 */
-    private boolean isFirstMove;
 
     /** 回合计数 */
     private int turnCount;
@@ -116,8 +118,7 @@ public class AI extends core.player.AI {
      * 核心决策逻辑（V2版本：集成α-β搜索 + 精细化威胁）
      */
     private int[] makeDecision() {
-        // 同步棋盘状态到V1Board
-        syncBoard();
+        // V1Board 与基础棋盘共享状态，无需额外同步
 
         // 【触发式补充】中后盘扩展候选范围，确保不漏远处威胁
         expandCandidatesIfNeeded();
@@ -155,13 +156,40 @@ public class AI extends core.player.AI {
             return compoundDefense;
         }
 
+        // 步骤3：低优先级开局库（仅在早期且确认无紧急威胁时使用）
+        if (v1Board.getPieceCount() <= 8) {
+            // 再次确认无致命/高威胁，防止漏掉对手四连
+            ThreatEvaluator teEarly = moveGenerator.getThreatEvaluator();
+            List<Integer> defEarly = teEarly.getDefensePositions(oppColor);
+            if (teEarly.getCriticalThreatCount() > 0 || teEarly.getThreatCount() > 0) {
+                if (!defEarly.isEmpty()) return createDefenseMove(defEarly);
+                List<Integer> fb = findCriticalDefenseFallback();
+                if (!fb.isEmpty()) return createDefenseMove(fb);
+            } else {
+                int[] book = OpeningBook.pickOpeningMove(v1Board, myColor, turnCount);
+                if (book != null) {
+                    return book;
+                }
+            }
+        }
+
         // 步骤3：尝试威胁空间搜索（强制胜负链）
         int[] tbsMove = searchThreatSpace();
         if (tbsMove != null) {
             return tbsMove;
         }
 
-        // 步骤3.5：尝试MCTS（仿真评估）
+        // 步骤3.5：进入 MCTS/α-β 前的保险防守扫描
+        List<Integer> preDef = threatEval.getDefensePositions(oppColor);
+        if (!preDef.isEmpty()) {
+            return createDefenseMove(preDef);
+        }
+        if (threatEval.getThreatCount() > 0) {
+            List<Integer> fb = findCriticalDefenseFallback();
+            if (!fb.isEmpty()) return createDefenseMove(fb);
+        }
+
+        // 步骤3.6：尝试MCTS（仿真评估）
         int[] mctsMove = searchByMCTS();
         if (mctsMove != null) {
             return mctsMove;
@@ -171,6 +199,10 @@ public class AI extends core.player.AI {
         if (USE_ALPHA_BETA && alphaBetaSearcher != null) {
             int[] searchMove = alphaBetaSearcher.search(myColor, oppColor);
             if (searchMove != null) {
+                // 将搜索表现反馈给策略管理器
+                int nodes = alphaBetaSearcher.getNodeCount();
+                double cr = alphaBetaSearcher.getCutoffRate();
+                StrategyManager.reportSearchReward(currentStrategyId, nodes, cr);
                 return searchMove;
             }
         }
@@ -237,15 +269,15 @@ public class AI extends core.player.AI {
         if (!USE_THREAT_SPACE || threatSpaceSearcher == null) {
             return null;
         }
-        return threatSpaceSearcher.searchForcingWin(myColor, oppColor, TBS_MAX_DEPTH, TBS_TIME_LIMIT_MS);
+        return threatSpaceSearcher.searchForcingWin(myColor, oppColor, TBS_MAX_DEPTH, tbsTimeLimitMs);
     }
 
     /**
      * MCTS 搜索入口：在时间预算内返回仿真收益最高的着法
      */
     private int[] searchByMCTS() {
-        if (!USE_MCTS || mctsSearcher == null) return null;
-        return mctsSearcher.search(myColor, oppColor, MCTS_TIME_LIMIT_MS);
+        if (!useMCTS || mctsSearcher == null) return null;
+        return mctsSearcher.search(myColor, oppColor, mctsTimeLimitMs);
     }
 
     /**
@@ -376,10 +408,7 @@ public class AI extends core.player.AI {
     /**
      * 同步基础棋盘到V1Board
      */
-    private void syncBoard() {
-        // V1Board继承自Board，共享状态
-        // 确保候选位置已更新
-    }
+    // 已移除：syncBoard()（V1Board 与基础棋盘共享，无需显式同步）
 
     /**
      * 确定己方颜色
@@ -468,13 +497,18 @@ public class AI extends core.player.AI {
         this.board = new V1Board();
         this.v1Board = (V1Board) this.board;
         this.moveGenerator = new MoveGenerator(v1Board);
+        int ttCap = Integer.getInteger("g08.tt.capacity", 200_000);
+        this.transpositionTable = new TranspositionTable(ttCap);
         this.alphaBetaSearcher = new AlphaBetaSearcher(v1Board, moveGenerator, transpositionTable);
         this.threatSpaceSearcher = new ThreatSpaceSearcher(v1Board, moveGenerator);
-        this.transpositionTable = new TranspositionTable();
+        // 策略选择（多臂轮换）
+        StrategyManager.Selection sel = StrategyManager.pickStrategyForNewGame();
+        this.currentStrategyId = sel.id;
+        this.useMCTS = sel.strategy.useMCTS;
+        this.mctsTimeLimitMs = sel.strategy.mctsTimeMs;
         this.mctsSearcher = new MCTSSearcher(v1Board, moveGenerator, transpositionTable);
         this.myColor = null;
         this.oppColor = null;
-        this.isFirstMove = true;
         this.turnCount = 0;
         this.linesInitialized = false;
     }

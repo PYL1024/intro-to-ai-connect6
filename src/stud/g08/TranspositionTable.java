@@ -14,7 +14,10 @@ public class TranspositionTable {
         public int value;      // 评估分值
         public int depth;      // 可选：记录评估深度
         public int[] bestMove; // 可选：推荐着法
+        public Flag flag;      // 边界类型
     }
+
+    public enum Flag { EXACT, LOWER, UPPER }
 
     private static final int BOARD_SIZE = 19 * 19;
     private static final long[][] ZOBRIST = new long[BOARD_SIZE][3];
@@ -29,6 +32,17 @@ public class TranspositionTable {
     }
 
     private final Map<Long, TTEntry> evalTable = new HashMap<>();
+
+    /** 容量上限（可调）；超出后按简单替换策略（低深度优先淘汰）。 */
+    private final int capacity;
+
+    public TranspositionTable() {
+        this(200_000);
+    }
+
+    public TranspositionTable(int capacity) {
+        this.capacity = capacity;
+    }
 
     public long computeInitialKey(V1Board board) {
         long key = 0L;
@@ -57,14 +71,37 @@ public class TranspositionTable {
         return null;
     }
 
-    public void storeEval(long key, int value, int depth, int[] bestMove) {
+    public void storeEval(long key, int value, int depth, int[] bestMove, Flag flag) {
         TTEntry e = evalTable.get(key);
-        if (e == null || depth >= e.depth) {
+        if (e == null) {
+            // 容量控制：若超限，尝试淘汰一个浅深度条目
+            if (evalTable.size() >= capacity) {
+                evictShallowEntry();
+            }
             e = new TTEntry();
             evalTable.put(key, e);
+        } else if (depth < e.depth) {
+            // 仅当新深度不低于旧深度时覆盖
+            return;
         }
         e.value = value;
         e.depth = depth;
         e.bestMove = bestMove;
+        e.flag = flag;
+    }
+
+    /** 简单淘汰策略：移除一个最浅深度的条目。 */
+    private void evictShallowEntry() {
+        Long targetKey = null;
+        int shallow = Integer.MAX_VALUE;
+        for (Map.Entry<Long, TTEntry> en : evalTable.entrySet()) {
+            if (en.getValue().depth < shallow) {
+                shallow = en.getValue().depth;
+                targetKey = en.getKey();
+            }
+        }
+        if (targetKey != null) {
+            evalTable.remove(targetKey);
+        }
     }
 }

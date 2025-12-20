@@ -113,6 +113,16 @@ public class MCTSSearcher {
                 return true;
             }
             // 选择UCT子
+            // Progressive Widening：按访问次数逐步增加子节点
+            if (node.poolMoves != null && node.nextIdx < node.poolMoves.size()) {
+                int targetSize = Math.min(node.poolMoves.size(), 3 + node.visits / 2);
+                while (node.children.size() < targetSize && node.nextIdx < node.poolMoves.size()) {
+                    int[] mv = node.poolMoves.get(node.nextIdx);
+                    double prior = computeMovePrior(mv, opponent, current);
+                    node.children.add(new Node(node, mv, prior));
+                    node.nextIdx++;
+                }
+            }
             node = node.selectChild();
             // 交换执手
             PieceColor tmp = current; current = opponent; opponent = tmp;
@@ -134,8 +144,16 @@ public class MCTSSearcher {
             return current == myColor;
         }
         List<int[]> childrenMoves = moveGenerator.generateMoves(opponent, current);
-        int cap = Math.min(6, childrenMoves.size());
-        node.expand(childrenMoves.subList(0, cap));
+        // 计算先验分数并初始化少量子节点，剩余放入池用于后续渐进扩宽
+        node.poolMoves = childrenMoves;
+        node.nextIdx = 0;
+        int initialCap = Math.min(3, childrenMoves.size());
+        for (int i = 0; i < initialCap; i++) {
+            int[] mv = childrenMoves.get(i);
+            double prior = computeMovePrior(mv, opponent, current);
+            node.children.add(new Node(node, mv, prior));
+            node.nextIdx++;
+        }
 
         // 仿真：从一个新子开始随机/启发式模拟
         int[] playoutStart = node.children.isEmpty() ? null : node.children.get(rnd.nextInt(node.children.size())).move;
@@ -194,7 +212,7 @@ public class MCTSSearcher {
                 eval = e.value;
             } else {
                 eval = board.evaluateBoard();
-                tt.storeEval(key, eval, 0, null);
+                tt.storeEval(key, eval, 0, null, TranspositionTable.Flag.EXACT);
             }
             return (myColor == PieceColor.BLACK && eval > 0) || (myColor == PieceColor.WHITE && eval < 0);
         } finally {
@@ -236,31 +254,50 @@ public class MCTSSearcher {
         Node parent;
         int[] move;
         List<Node> children = new ArrayList<>();
+        List<int[]> poolMoves; // 候选池用于渐进扩宽
+        int nextIdx = 0;       // 下一个待加入子节点的索引
         int visits = 0;
         int wins = 0;
+        double prior = 0.0;    // 先验概率（来自启发式评分）
 
         Node(Node parent, int[] move) {
             this.parent = parent;
             this.move = move;
         }
+        Node(Node parent, int[] move, double prior) {
+            this.parent = parent;
+            this.move = move;
+            this.prior = prior;
+        }
 
         boolean isExpanded() { return !children.isEmpty(); }
 
         Node selectChild() {
-            double C = 1.2;
+            double cPuct = 1.2;
             Node best = null;
             double bestVal = -1e9;
             for (Node ch : children) {
-                double avg = ch.visits > 0 ? ((double) ch.wins / ch.visits) : 0.0;
-                double uct = avg + C * Math.sqrt(Math.log(Math.max(1, this.visits)) / Math.max(1, ch.visits));
-                if (uct > bestVal) { bestVal = uct; best = ch; }
+                double q = ch.visits > 0 ? ((double) ch.wins / ch.visits) : 0.0;
+                double u = cPuct * ch.prior * Math.sqrt(Math.max(1, this.visits)) / (1 + ch.visits);
+                double val = q + u;
+                if (val > bestVal) { bestVal = val; best = ch; }
             }
             return best;
         }
+    }
 
-        void expand(List<int[]> moves) {
-            for (int[] m : moves) children.add(new Node(this, m));
-        }
+    private double computeMovePrior(int[] move, PieceColor side, PieceColor opponent) {
+        int s = 0;
+        int row1 = V1Board.toRow(move[0]);
+        int col1 = V1Board.toCol(move[0]);
+        int row2 = V1Board.toRow(move[1]);
+        int col2 = V1Board.toCol(move[1]);
+        s += board.evaluateMoveIncrement(move[0], side);
+        s += board.evaluateMoveIncrement(move[1], side);
+        s += MoveGenerator.getPositionScore(row1, col1);
+        s += MoveGenerator.getPositionScore(row2, col2);
+        // 简单归一化到 [0,1]
+        return Math.max(0.0, Math.min(1.0, s / 100000.0));
     }
 
     private void backprop(List<Node> path, boolean winForMe) {

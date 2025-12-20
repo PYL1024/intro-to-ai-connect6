@@ -1,109 +1,64 @@
-# V3 优化算法原理与效果
+# V3 优化（详细说明）
 
-本文汇总本 AI 在 V3/V3.1 阶段新增与加强的优化算法，包含基本原理、实现要点、适用场景、以及预期效果与验证建议。便于阅读与复盘，也便于后续继续迭代。
+本节详细解释当前代码中已实现的优化算法、触发条件与关键实现位置，便于阅读与维护。
 
-## 目录
-- 置换表 TT + Zobrist 哈希
-- LMR（晚着法减枝）
-- 静态搜索（Quiescence Search）
-- 双子协同评分（Pair Synergy）
-- TBS 威胁搜索缓存与裁剪
-- 候选自适应策略（阶段/威胁/时间 细化）
-- 验证方法与建议指标
+## 1) 置换表 TT + Zobrist 哈希
+- 目的：避免重复搜索、用边界信息收窄窗口，提升剪枝效率。
+- 数据结构：`TranspositionTable.TTEntry { long key; int value; int depth; Flag flag; int[] bestMove; }`，其中 `flag ∈ {EXACT, LOWER, UPPER}`。
+- 关键位置：
+	- AlphaBeta 计算初始键与维护：`AlphaBetaSearcher.computeInitialInternalKey()`、`xorZobrist()`；共享 TT 键 `sharedTT.computeInitialKey(board)`。
+	- 置换表查询/存储：`sharedTT.probeEval(key, depth)`、`sharedTT.storeEval(key, depth, value, flag, bestMove)`。
+	- Aspiration Window：根节点以 `lastRootScore ± window` 搜索，失败再扩大窗口（`searchAtDepthWithWindow(...)`）。
+- 效果：重复局面直接返回；在 LOWER/UPPER 命中时可提前 cutoff 或快速 re-search。
 
----
+## 2) LMR（Late Move Reductions）
+- 目的：对排序靠后的“非战术”着法减深试探，节省时间；必要时复搜保证质量。
+- 触发条件（AlphaBeta）：`depth ≥ 4 && idx ≥ 4 && !isThreatMove(move) && !isDefBlock`。
+- 实现：先以 `reducedDepth = depth-1` 空窗口试探；若 `score > alpha`（fail-high），再以原深度全窗口复搜。
+- 位置：`AlphaBetaSearcher.alphaBeta(...)` 中 LMR 分支与复搜逻辑。
 
-## 置换表 TT + Zobrist 哈希
-- 原理: 用 Zobrist 哈希将局面映射为 64-bit key，存入置换表缓存搜过的值/界/最好着法，重复局面直接复用，减少重复搜索。
-- 实现: 
-  - AlphaBeta 与 TBS 均维护 `zobristKey`，`make/undo` 时按位异或更新。
-  - TT 条目记录 `value, depth, flag(EXACT/LOWER/UPPER), bestMove`，在边界命中直接返回或收窄窗口。
-- 适用: 任意阶段，迭代加深和回溯频繁的搜索尤为受益。
-- 预期效果: 节点数显著下降，PV 稳定性提升；在复杂中盘可显著提速。
+## 3) 静态搜索（Quiescence Search）
+- 目的：在叶子处继续仅扩展“战术相关”着法（致命威胁/双三等），减少静态评估噪声与地平线效应。
+- 实现：`AlphaBetaSearcher.quiescence(alpha,beta,...)`，调用受限的着法生成函数，仅含关键战术候选。
+- 与 LMR 配合：非关键分支被降深后若落到叶子，静搜可小范围延伸战术线，提升稳定性。
 
-## LMR（Late Move Reductions）
-- 原理: 对排序靠后且非战术/威胁的着法，先以降低的深度试探；若引起 fail-high 再以原深度复搜。
-- 实现: AlphaBeta 中对 idx≥3 且非威胁的着法应用减深；触发后若 `score>alpha` 则复搜。
-- 适用: 中后盘分支较大时，能快速淘汰大量弱着。
-- 预期效果: 平均分支因子下降，单位时间搜索深度提升 0.5~1 层。
+## 4) 双子协同评分（Pair Synergy）
+- 目的：Connect6 每步落两子，同一路/相互增强的组合更强；在排序上显式加权。
+- 实现：
+	- 在 `MoveGenerator.generateMoves(...)` 评分中叠加两点的增量路表分，并对“同一路（`Line.containsPosition`）”加分。
+	- 在 TBS 的 `evaluateThreatMove(...)` 中，若两点同一路则附加威胁加权（例如 +50_000）。
+- 影响：有效提升高价值组合的排序优先级，间接提高剪枝效率。
 
-## 静态搜索（Quiescence Search）
-- 原理: 到达叶子时若仍有不稳定的战术（如临近冲四/活三），继续只扩展“战术相关”的着法，以避免“静态评估噪声”。
-- 实现: 叶节点进入 `quiescence`，只展开致命威胁/双三等战术着法，窗口裁剪保持 α-β 语义。
-- 适用: 战术密集局面；缓解地平线效应。
-- 预期效果: 评估更稳健，减少因边界未收敛导致的误判。
+## 5) TBS 缓存与裁剪（威胁空间搜索）
+- 目的：威胁链搜索重复局面多，采用缓存与上限裁剪收敛搜索规模。
+- 缓存：
+	- `resultCache: Map<Long, Boolean>` 记忆当前键下攻方是否可成链；
+	- `defenseCache: Map<Long, List<int[]>>` 缓存对手防守集合，避免重复生成。
+- 候选裁剪：
+	- 进攻上限 `ATTACK_MOVE_LIMIT`，在 `collectThreateningMoves()` 中按 `ThreatAnalyzer` 评分筛选（四三/双四/双三与致命威胁高权重）。
+	- 防守上限 `DEFENSE_MOVE_LIMIT`，优先必堵点（`ThreatEvaluator.getDefensePositions()`），不足两点时为其拼接搭档，再补高分防守/反击。
+- 回溯：统一使用 `captureStateForSearch/restoreStateForSearch` 与 `updateLinesAfterMove/undoLinesAfterMove`，保证候选/路表一致。
+- 位置：`ThreatSpaceSearcher.*`。
 
-## 双子协同评分（Pair Synergy）
-- 原理: Connect6 每步两子，同一路/相互增强的组合常更强；对同一路、可形成双威胁的组合加分。
-- 实现: 
-  - 在 AlphaBeta 与 MoveGenerator 中，若两点位于同一路（Line）则给予显著加分；
-  - 同时叠加两点的增量路表评估（粗略二次项）。
-- 适用: 进攻组织、复合威胁构造。
-- 预期效果: 排序更贴近人类直觉，极大提升剪枝效率与胜势捕捉率。
+## 6) PN-search（Proof-Number Search）
+- 目的：在 TBS 前先以 AND/OR 树快速证明/否证是否存在必胜首手，加速命中强制胜链。
+- 逻辑：
+	- OR 节点（进攻）：`proof = min(child.proof)`，`disproof = Σchild.disproof`；返回最佳首手。
+	- AND 节点（防守）：`proof = Σchild.proof`，`disproof = min(child.disproof)`。
+- 裁剪与缓存：
+	- 采用 Zobrist 键与 `pnCache: Map<Long, Result>` 记忆（`proof/disproof/bestMove`）。
+	- 候选生成限制：进攻用 `ThreatAnalyzer` 评分筛选；防守优先必堵点，辅以少量高分着法；节点/时间预算控制。
+- 位置：`PNSearcher.*`，在 `ThreatSpaceSearcher.searchForcingWin(...)` 入口先行调用。
 
-## TBS 威胁搜索缓存与裁剪
-- 原理: 威胁空间搜索是“强制链”枚举，重复局面很多。对每个哈希局面缓存结果与防守集合，避免重复展开；同时限制进攻/防守候选上限。
-- 实现: 
-  - `resultCache: hash -> boolean` 记忆该局面对当前一方是否可成链；
-  - `defenseCache: hash -> List<int[]>` 缓存当前局面的防守集合；
-  - 进攻/防守上限分别为 12/6，并优先强威胁与防守点；
-  - 立即胜与无防守可挡的判定快速返回。
-- 适用: 有明确威胁链的中盘攻防。
-- 预期效果: 去重后搜索树规模大幅缩小，威胁链命中率与速度提升。
+## 7) MCTS（PUCT + Progressive Widening）
+- 目的：在不确定局面下以仿真估计着法质量，结合先验平衡探索/利用。
+- 选择（PUCT）：按 `Q + c_puct * P * sqrt(N_parent)/(1+N)` 选择子节点，`P` 来自 `MoveGenerator` 评分归一化。
+- 渐进加宽：随访问数增长，逐步解锁更多子节点，避免初期过宽造成仿真稀疏。
+- 回传：沿路径回传胜负/评估，节点累计 `N/W`；必要时以共享 TT 估值作为仿真缺省值。
+- 位置：`MCTSSearcher.*`。
 
-## 候选自适应策略（阶段/威胁/时间 细化）
-- 原理: 候选宽度应根据“对局阶段、威胁压力、剩余时间、搜索深度/根节点”自适应，动态平衡“广度与深度、攻与守”。
-- 实现要点: 
-  - 局面分期: 以棋子数分 Early(<30)、Mid(30~80)、Late(≥80)。
-  - 威胁压力: 基于 `ThreatEvaluator` 的威胁/致命威胁计数放大防守权重。
-  - 时间驱动: 根节点随剩余时间上调/下调位置与着法上限；深层逐步收窄。
-  - 组合策略: 根节点采用“渐进加宽”随深度小幅放宽位置上限；内部节点更保守。
-- 预期效果: 
-  - 在资源紧张时更聚焦要点，保证深度；
-  - 在威胁高压时优先进场防点，降低漏搜；
-  - 在攻势窗口内更积极扩展，提升胜势兑现率。
+## 8) OpeningBook（低优先级）
+- 仅在开局且确认无紧急威胁时尝试；以中心附近的稳健模板为主，优先保证安全性。
 
-## 开局库/定式与随机化
-- 原理: 早期用高胜率中心型定式（十字、菱形、同路推进）指导选择，减少早期盲搜；在等价解之间随机选择以防被针对。
-- 实现: `OpeningBook.getOpeningMove()` 提供若干近中心双子组合；`AI` 在前期优先调用；从前 2~3 个候选中随机挑选。
-- 预期效果: 开局更稳健、减少搜索时间波动；对抗固定策略时不易被“背谱”。
-
-## TBS 增强（不可挡判定）
- 原理: 对强制威胁链进行更细的模板评分（四三、双四、双三等），并以此收紧进攻候选；取消激进的不可挡早停，改为保守评分驱动。
- 实现: 在 `evaluateThreatMove()` 中对 `hasFourThree/hasDoubleFour/hasDoubleThree` 分别赋予更细权重；追加同路协同加分；适度降低 ATTACK_MOVE_LIMIT。
- 预期效果: 提升威胁候选质量，减少误判引发的错误必胜宣告，整体更稳健。
-
-## 评估与特征增强
- 实现: `OpeningBook.getOpeningMove()` 提供近中心与非对称变体；过滤低质量组合（增量评估与同路协同）；从前 2 个候选中随机挑选；结合 `OpponentProfile` 在线偏置（倾向打破对称）。
-- 预期效果: 排序质量提升、剪枝效率提高，进攻与防守的取舍更合理。
-
-## 数据与简易自动调参
-- 原理: 收集每步的搜索统计（节点、剪枝率、阶段等），根据统计对候选上限做轻度自适应调整。
-- 实现: `SearchLogger` 将数据写入 `logs/g08_log.csv`；`AlphaBetaSearcher` 引入 `tuningAdjustment()` 依据上轮统计微调位置/着法上限。
-- 预期效果: 在不同机型与对局风格下逐步自适应，更稳定地平衡广度与深度。
-
----
-
-## 验证方法与建议指标
-- 测试集: 
-  - 开局模板 20 盘（含星月/斜月等常见布局）
-  - 中盘攻防 30 盘（含双活三/冲四活三构造与破解）
-  - 终局读秒 20 盘（剩余空位稀疏，验证收束）
-- 指标: 
-  - NPS: 每秒节点数（AlphaBeta & TBS）
-  - 剪枝率: `cutoffCount / nodeCount`
-  - PV 稳定性: 相邻深度主变前缀一致长度
-  - TBS 触发胜率: 有威胁链局面下的即时胜链命中率
-  - 实战胜率: 对比 V2/V3 不同开局/中盘模板的胜率
-- 建议流程: 
-  1) 开启/关闭某个优化（如 LMR/静搜/协同/自适应），固定种子跑 50~100 局；
-  2) 记录统计日志（节点、剪枝、耗时、胜率），绘制雷达图或折线图；
-  3) 对异常对局进行 PV/节点追踪，定位误杀/漏搜原因；
-  4) 结合日志微调阈值（候选上限、威胁权重、阶段边界）。
-
----
-
-## 版本与注意事项
-- 当前实现面向 19x19 Connect6，路表增量评估+四向线段；
-- 参数与上限（如 ATTACK/DEFENSE 上限、候选上限等）可按机器性能微调；
-- 若要进一步提升，可引入：分布式 TT、跨局 Zobrist 熵种重用、领域自博弈参数搜索（grid/贝叶斯优化）。
+## 9) 参数与可调项
+- 基于代码常量与少量系统属性（如 `g08.tt.capacity`）管理；不依赖外部 JSON/脚本。

@@ -1,4 +1,4 @@
-# g08 V1/V2 功能/函数索引
+# g08 主要类与函数索引（代码对应）
 
 > 摘要：汇总当前版本在 g08 包内的核心数据结构、方法与用途，便于后续迭代（α-β 剪枝、增量评估等）。
 
@@ -81,7 +81,7 @@
 - 取威胁评估器：`getThreatEvaluator()`
 - 静态：`getPositionScore(row, col)` 获取位置分
 
-## AlphaBetaSearcher.java（V2新增：α-β搜索）
+## AlphaBetaSearcher.java（α-β搜索）
 
 - 常量：`INF`、`WIN_SCORE`、`DEFAULT_DEPTH=4`、`MAX_TIME_MS=4500`、`MAX_MOVES=30`
 - 状态：`board`、`moveGenerator`、`myColor`、`oppColor`、`startTime`、`timeout`、`nodeCount`、`bestMove`
@@ -99,10 +99,10 @@
 - 统计：`getNodeCount()`
 - 内部类：`ScoredPosition`、`ScoredMove`
 
-## AI.java（V2决策主流程）
+## AI.java（决策主流程）
 
 - 常量：`BOARD_SIZE=19`、`AI_NAME="G08-V3-TBS"`、`USE_ALPHA_BETA=true`
-- 状态：`v1Board`、`moveGenerator`、`alphaBetaSearcher`、`myColor`、`oppColor`、`isFirstMove`、`turnCount`、`linesInitialized`
+- 状态：`v1Board`、`moveGenerator`、`alphaBetaSearcher`、`myColor`、`oppColor`、`turnCount`、`linesInitialized`
 - 核心：`findNextMove(Move opponentMove)`
   - 同步对手落子到 `board` 与候选
   - `determineColor()` 判定先后手
@@ -115,7 +115,7 @@
   - 执行落子并更新候选和路表
 - 防守辅助：`createDefenseMove(defensePositions)`
 - 路表管理：`initOrUpdateLines(opponentMove)`
-- 工具：`countPieces()`、`fallbackMove()`、`syncBoard()`
+- 工具：`countPieces()`、`fallbackMove()`（syncBoard 已移除，V1Board 与基础棋盘共享状态）
 - 生命周期：`name()`、`playGame(Game game)` 重置状态并装配组件（含 AlphaBetaSearcher）
 
 ## 其他文件

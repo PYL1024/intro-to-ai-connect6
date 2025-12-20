@@ -85,6 +85,8 @@ public class AlphaBetaSearcher {
 
     /** 最佳着法（迭代加深过程中更新） */
     private int[] bestMove;
+    /** 上一轮根节点分值（用于立志窗口） */
+    private Integer lastRootScore = null;
 
     /** 杀手着法表 [深度][槽位][着法] */
     private final int[][][] killerMoves;
@@ -178,21 +180,45 @@ public class AlphaBetaSearcher {
         zobristKey = computeInitialInternalKey();
         sharedKey = sharedTT != null ? sharedTT.computeInitialKey(board) : 0L;
 
-        // 迭代加深搜索
+        // 迭代加深搜索（立志窗口）
         for (int depth = 2; depth <= DEFAULT_DEPTH; depth += 2) {
             if (isTimeout()) {
                 break;
             }
+            int asp = 5000;
+            // 若共享TT在根有EXACT值，用其作为初始中心
+            if (lastRootScore == null && sharedTT != null) {
+                TranspositionTable.TTEntry rootE = sharedTT.probeEval(sharedKey, 0);
+                if (rootE != null && rootE.flag == TranspositionTable.Flag.EXACT) {
+                    lastRootScore = rootE.value;
+                }
+            }
+            int baseAlpha = (lastRootScore != null) ? Math.max(-INF, lastRootScore - asp) : -INF;
+            int baseBeta  = (lastRootScore != null) ? Math.min(INF,  lastRootScore + asp) :  INF;
 
-            int[] move = searchAtDepth(depth);
-            if (move != null && !timeout) {
-                bestMove = move;
+            SearchResult result = searchAtDepthWithWindow(depth, baseAlpha, baseBeta);
+            if (result.bestMove != null && !timeout) {
+                bestMove = result.bestMove;
                 // 记录主变量
-                pvTable[0][0] = move[0];
-                pvTable[0][1] = move[1];
+                pvTable[0][0] = bestMove[0];
+                pvTable[0][1] = bestMove[1];
+                lastRootScore = result.bestScore;
                 // 将根节点的最佳着法写入共享TT以便其他搜索器使用
                 if (sharedTT != null) {
-                    sharedTT.storeEval(sharedKey, 0, depth, move);
+                    sharedTT.storeEval(sharedKey, 0, depth, bestMove, TranspositionTable.Flag.EXACT);
+                }
+            }
+
+            // 立志窗口失败时重搜
+            if (!timeout && lastRootScore != null && (lastRootScore <= baseAlpha || lastRootScore >= baseBeta)) {
+                int a2 = (lastRootScore <= baseAlpha) ? -INF : baseAlpha;
+                int b2 = (lastRootScore >= baseBeta)  ?  INF : baseBeta;
+                SearchResult retry = searchAtDepthWithWindow(depth, a2, b2);
+                if (retry.bestMove != null) {
+                    bestMove = retry.bestMove;
+                    lastRootScore = retry.bestScore;
+                    pvTable[0][0] = bestMove[0];
+                    pvTable[0][1] = bestMove[1];
                 }
             }
         }
@@ -206,15 +232,15 @@ public class AlphaBetaSearcher {
     /**
      * 在指定深度进行搜索
      */
-    private int[] searchAtDepth(int depth) {
+    private SearchResult searchAtDepthWithWindow(int depth, int alphaInit, int betaInit) {
         List<ScoredMove> moves = generateOrderedMoves(myColor, oppColor, depth, true);
         if (moves.isEmpty()) {
-            return null;
+            return new SearchResult(null, -INF);
         }
 
         int[] best = null;
-        int alpha = -INF;
-        int beta = INF;
+        int alpha = alphaInit;
+        int beta = betaInit;
         boolean firstMove = true;
 
         for (int idx = 0; idx < moves.size(); idx++) {
@@ -251,7 +277,7 @@ public class AlphaBetaSearcher {
             }
         }
 
-        return best;
+        return new SearchResult(best, alpha);
     }
 
     /**
@@ -274,7 +300,7 @@ public class AlphaBetaSearcher {
             return 0;
         }
 
-        // 置换表探测
+        // 置换表探测（内部 + 共享）
         TTEntry tt = transpositionTable.get(zobristKey);
         if (tt != null && tt.depth >= depth) {
             if (tt.flag == TTEntry.Flag.EXACT) {
@@ -283,6 +309,18 @@ public class AlphaBetaSearcher {
                 return tt.value;
             } else if (tt.flag == TTEntry.Flag.UPPER && tt.value <= alpha) {
                 return tt.value;
+            }
+        }
+        if (sharedTT != null) {
+            TranspositionTable.TTEntry se = sharedTT.probeEval(sharedKey, depth);
+            if (se != null) {
+                if (se.flag == TranspositionTable.Flag.EXACT) {
+                    return se.value;
+                } else if (se.flag == TranspositionTable.Flag.LOWER && se.value >= beta) {
+                    return se.value;
+                } else if (se.flag == TranspositionTable.Flag.UPPER && se.value <= alpha) {
+                    return se.value;
+                }
             }
         }
 
@@ -379,8 +417,10 @@ public class AlphaBetaSearcher {
             flag = TTEntry.Flag.EXACT;
         }
         storeTT(alpha, depth, flag, null);
-        if (sharedTT != null && flag == TTEntry.Flag.EXACT) {
-            sharedTT.storeEval(sharedKey, alpha, depth, null);
+        if (sharedTT != null) {
+            TranspositionTable.Flag sFlag = (flag == TTEntry.Flag.EXACT) ? TranspositionTable.Flag.EXACT
+                    : (flag == TTEntry.Flag.LOWER ? TranspositionTable.Flag.LOWER : TranspositionTable.Flag.UPPER);
+            sharedTT.storeEval(sharedKey, alpha, depth, null, sFlag);
         }
         return alpha;
     }
@@ -671,7 +711,7 @@ public class AlphaBetaSearcher {
                 boardScore = e.value;
             } else {
                 boardScore = board.evaluateBoard();
-                sharedTT.storeEval(sharedKey, boardScore, 0, null);
+                sharedTT.storeEval(sharedKey, boardScore, 0, null, TranspositionTable.Flag.EXACT);
             }
         } else {
             boardScore = board.evaluateBoard();
@@ -774,6 +814,12 @@ public class AlphaBetaSearcher {
             if (score > alpha) alpha = score;
         }
         return alpha;
+    }
+
+    private static class SearchResult {
+        int[] bestMove;
+        int bestScore;
+        SearchResult(int[] m, int s) { this.bestMove = m; this.bestScore = s; }
     }
 
     private List<ScoredMove> generateTacticalMoves(PieceColor current, PieceColor opponent, int ply) {

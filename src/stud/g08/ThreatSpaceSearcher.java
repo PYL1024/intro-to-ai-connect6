@@ -36,6 +36,7 @@ public class ThreatSpaceSearcher {
     private final V1Board board;
     private final MoveGenerator moveGenerator;
     private final ThreatEvaluator threatEvaluator;
+    private final PNSearcher pnSearcher;
 
     private PieceColor attackerColor;
     private PieceColor defenderColor;
@@ -66,7 +67,9 @@ public class ThreatSpaceSearcher {
         this.board = board;
         this.moveGenerator = moveGenerator;
         this.threatEvaluator = new ThreatEvaluator(board);
+        this.pnSearcher = new PNSearcher(board, moveGenerator);
     }
+
 
     /**
      * 入口：在给定时间与深度限制下搜索强制胜利着法。
@@ -89,6 +92,13 @@ public class ThreatSpaceSearcher {
 
         if (!board.isLinesBuilt()) {
             board.buildLines(attackerColor);
+        }
+
+        // 先尝试 PN-search 在更紧的时间/节点预算下寻找必胜首手
+        long pnMs = Math.max(1L, timeLimitMs / 2);
+        int[] pnMove = pnSearcher.search(attackerColor, defenderColor, pnMs, 40_000);
+        if (pnMove != null) {
+            return pnMove;
         }
 
         List<ScoredMove> threatMoves = collectThreateningMoves();
