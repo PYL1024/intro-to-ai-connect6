@@ -98,11 +98,16 @@ public class AlphaBetaSearcher {
     /** 棋盘候选状态栈（用于精确回溯） */
     private Deque<V1Board.BoardState> stateStack;
 
-    /** 置换表（TT） */
+    /** 内部置换表（TT，含边界类型） */
     private final Map<Long, TTEntry> transpositionTable = new HashMap<>();
 
-    /** Zobrist 哈希键 */
+    /** 共享置换表（跨搜索器复用评估） */
+    private final TranspositionTable sharedTT;
+
+    /** Zobrist 哈希键（内部表） */
     private long zobristKey = 0L;
+    /** Zobrist 哈希键（共享TT） */
+    private long sharedKey = 0L;
 
     /** Zobrist 随机表 [pos][colorIndex] */
     private static final long[][] ZOBRIST = new long[19 * 19][3];
@@ -118,9 +123,10 @@ public class AlphaBetaSearcher {
 
     // ===================== 构造函数 =====================
 
-    public AlphaBetaSearcher(V1Board board, MoveGenerator moveGenerator) {
+    public AlphaBetaSearcher(V1Board board, MoveGenerator moveGenerator, TranspositionTable sharedTT) {
         this.board = board;
         this.moveGenerator = moveGenerator;
+        this.sharedTT = sharedTT;
         this.killerMoves = new int[MAX_DEPTH][KILLER_SLOTS][2]; // [depth][slot][pos1,pos2]
         this.historyTable = new int[HISTORY_SIZE];
         this.pvTable = new int[MAX_DEPTH][2];
@@ -168,6 +174,10 @@ public class AlphaBetaSearcher {
             board.buildLines(myColor);
         }
 
+        // 初始化 Zobrist 键（内部与共享TT）
+        zobristKey = computeInitialInternalKey();
+        sharedKey = sharedTT != null ? sharedTT.computeInitialKey(board) : 0L;
+
         // 迭代加深搜索
         for (int depth = 2; depth <= DEFAULT_DEPTH; depth += 2) {
             if (isTimeout()) {
@@ -180,6 +190,10 @@ public class AlphaBetaSearcher {
                 // 记录主变量
                 pvTable[0][0] = move[0];
                 pvTable[0][1] = move[1];
+                // 将根节点的最佳着法写入共享TT以便其他搜索器使用
+                if (sharedTT != null) {
+                    sharedTT.storeEval(sharedKey, 0, depth, move);
+                }
             }
         }
 
@@ -365,6 +379,9 @@ public class AlphaBetaSearcher {
             flag = TTEntry.Flag.EXACT;
         }
         storeTT(alpha, depth, flag, null);
+        if (sharedTT != null && flag == TTEntry.Flag.EXACT) {
+            sharedTT.storeEval(sharedKey, alpha, depth, null);
+        }
         return alpha;
     }
 
@@ -593,6 +610,10 @@ public class AlphaBetaSearcher {
         // Zobrist 更新
         xorZobrist(pos1, color);
         xorZobrist(pos2, color);
+        if (sharedTT != null) {
+            sharedKey = sharedTT.xorZobrist(sharedKey, pos1, color);
+            sharedKey = sharedTT.xorZobrist(sharedKey, pos2, color);
+        }
 
         // 更新候选位置
         board.updateCandidatesAfterMove(pos1);
@@ -621,6 +642,10 @@ public class AlphaBetaSearcher {
         // Zobrist 回滚（XOR 同一值两次即可回滚）
         xorZobrist(pos1, color);
         xorZobrist(pos2, color);
+        if (sharedTT != null) {
+            sharedKey = sharedTT.xorZobrist(sharedKey, pos1, color);
+            sharedKey = sharedTT.xorZobrist(sharedKey, pos2, color);
+        }
 
         // 精确恢复候选/边界/计数状态
         V1Board.BoardState state = stateStack.pop();
@@ -639,7 +664,18 @@ public class AlphaBetaSearcher {
      */
     private int evaluate(PieceColor side) {
         // 使用路表的全局评估
-        int boardScore = board.evaluateBoard();
+        int boardScore;
+        if (sharedTT != null) {
+            TranspositionTable.TTEntry e = sharedTT.probeEval(sharedKey, 0);
+            if (e != null) {
+                boardScore = e.value;
+            } else {
+                boardScore = board.evaluateBoard();
+                sharedTT.storeEval(sharedKey, boardScore, 0, null);
+            }
+        } else {
+            boardScore = board.evaluateBoard();
+        }
 
         // 如果是对方视角，取负
         if (side != myColor) {
@@ -704,7 +740,22 @@ public class AlphaBetaSearcher {
 
     private int[] getTTMove() {
         TTEntry e = transpositionTable.get(zobristKey);
-        return e != null ? e.bestMove : null;
+        if (e != null && e.bestMove != null) return e.bestMove;
+        if (sharedTT != null) {
+            TranspositionTable.TTEntry se = sharedTT.probeEval(sharedKey, 0);
+            if (se != null) return se.bestMove;
+        }
+        return null;
+    }
+
+    private long computeInitialInternalKey() {
+        long key = 0L;
+        for (int pos = 0; pos < 19 * 19; pos++) {
+            PieceColor c = board.get(pos);
+            int cIdx = (c == PieceColor.BLACK) ? 1 : (c == PieceColor.WHITE ? 2 : 0);
+            key ^= ZOBRIST[pos][cIdx];
+        }
+        return key;
     }
 
     private int quiescence(int alpha, int beta, PieceColor current, PieceColor opponent, int ply) {

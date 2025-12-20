@@ -67,6 +67,16 @@ public class AI extends core.player.AI {
     /** 威胁空间搜索器 */
     private ThreatSpaceSearcher threatSpaceSearcher;
 
+    /** 蒙特卡洛树搜索器（MCTS） */
+    private MCTSSearcher mctsSearcher;
+    /** 共享置换表（评估缓存） */
+    private TranspositionTable transpositionTable;
+
+    /** 是否启用MCTS */
+    private static final boolean USE_MCTS = true;
+    /** MCTS 时间预算（毫秒） */
+    private static final long MCTS_TIME_LIMIT_MS = 600;
+
     // 简易搜索日志已移除
 
     /** 己方颜色 */
@@ -151,6 +161,12 @@ public class AI extends core.player.AI {
             return tbsMove;
         }
 
+        // 步骤3.5：尝试MCTS（仿真评估）
+        int[] mctsMove = searchByMCTS();
+        if (mctsMove != null) {
+            return mctsMove;
+        }
+
         // 步骤4：使用α-β搜索寻找最优着法
         if (USE_ALPHA_BETA && alphaBetaSearcher != null) {
             int[] searchMove = alphaBetaSearcher.search(myColor, oppColor);
@@ -222,6 +238,14 @@ public class AI extends core.player.AI {
             return null;
         }
         return threatSpaceSearcher.searchForcingWin(myColor, oppColor, TBS_MAX_DEPTH, TBS_TIME_LIMIT_MS);
+    }
+
+    /**
+     * MCTS 搜索入口：在时间预算内返回仿真收益最高的着法
+     */
+    private int[] searchByMCTS() {
+        if (!USE_MCTS || mctsSearcher == null) return null;
+        return mctsSearcher.search(myColor, oppColor, MCTS_TIME_LIMIT_MS);
     }
 
     /**
@@ -444,8 +468,10 @@ public class AI extends core.player.AI {
         this.board = new V1Board();
         this.v1Board = (V1Board) this.board;
         this.moveGenerator = new MoveGenerator(v1Board);
-        this.alphaBetaSearcher = new AlphaBetaSearcher(v1Board, moveGenerator);
+        this.alphaBetaSearcher = new AlphaBetaSearcher(v1Board, moveGenerator, transpositionTable);
         this.threatSpaceSearcher = new ThreatSpaceSearcher(v1Board, moveGenerator);
+        this.transpositionTable = new TranspositionTable();
+        this.mctsSearcher = new MCTSSearcher(v1Board, moveGenerator, transpositionTable);
         this.myColor = null;
         this.oppColor = null;
         this.isFirstMove = true;
