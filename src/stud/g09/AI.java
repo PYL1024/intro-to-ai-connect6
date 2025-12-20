@@ -1,35 +1,35 @@
-package stud.g08;
+package stud.g09;
 
 import core.board.PieceColor;
 import core.game.Game;
 import core.game.Move;
+import stud.g09.TranspositionTable;
 
 import java.util.List;
 
 /**
- * V3阶段智能AI（TBS + α-β）
+ * V2阶段智能AI
  * <p>
  * 【功能特性】
  * 1. 胜着检测：检测并优先选择能直接获胜的着法
  * 2. 威胁防守：检测对手威胁并进行有效防守
  * 3. 智能着法生成：基于棋型评估生成和排序着法
- * 4. 路表快速评估：基于有效路的增量评估
- * 5. α-β剪枝搜索：迭代加深搜索最优着法
- * 6. 【V3新增】威胁空间搜索（TBS）：强制性威胁链搜索，抢先找出必胜序列
+ * 4. 【V2新增】路表快速评估：基于有效路的增量评估
+ * 5. 【V2新增】α-β剪枝搜索：迭代加深搜索最优着法
  * <p>
  * 【决策流程】
  * 1. 检测己方胜着 → 如有，立即执行
  * 2. 检测对方威胁 → 如有紧急威胁，优先防守
- * 3. α-β搜索 / 【V3】威胁空间搜索 → 搜索最优着法
+ * 3. 【V2】α-β搜索 → 搜索最优着法
  * 4. 回退到启发式着法生成
  * <p>
  * 【设计说明】
  * - 继承自框架的AI基类
  * - 使用V1Board扩展棋盘功能 + 路表
- * - 集成α-β剪枝搜索 + 威胁空间搜索
+ * - 集成α-β剪枝搜索
  * 
- * @author 3阶段开发
- * @version 3.0
+ * @author V2阶段开发
+ * @version 2.0
  */
 public class AI extends core.player.AI {
 
@@ -39,7 +39,8 @@ public class AI extends core.player.AI {
     private static final int BOARD_SIZE = 19;
 
     /** AI名称 */
-    private static final String AI_NAME = "G08";
+//    private static final String AI_NAME = "G06-V2-AlphaBetaAI";
+    private static final String AI_NAME = "G09";
 
     /** 是否启用α-β搜索 */
     private static final boolean USE_ALPHA_BETA = true;
@@ -64,10 +65,11 @@ public class AI extends core.player.AI {
     /** α-β搜索器 */
     private AlphaBetaSearcher alphaBetaSearcher;
 
+    /** 共享置换表 */
+    private TranspositionTable transpositionTable;
+
     /** 威胁空间搜索器 */
     private ThreatSpaceSearcher threatSpaceSearcher;
-
-    // 简易搜索日志已移除
 
     /** 己方颜色 */
     private PieceColor myColor;
@@ -100,7 +102,59 @@ public class AI extends core.player.AI {
      * @param opponentMove 对手的着法
      * @return 己方着法
      */
-    
+    @Override
+    public Move findNextMove(Move opponentMove) {
+        turnCount++;
+
+        // 1. 处理对手着法
+        if (opponentMove != null) {
+            this.board.makeMove(opponentMove);
+            int pos1 = opponentMove.index1();
+            int pos2 = opponentMove.index2();
+            if (pos1 >= 0) {
+                v1Board.updateCandidatesAfterMove(pos1);
+            }
+            if (pos2 >= 0) {
+                v1Board.updateCandidatesAfterMove(pos2);
+            }
+        }
+
+        // 2. 确定己方颜色
+        determineColor();
+
+        // 3. 初始化/更新路表
+        initOrUpdateLines(opponentMove);
+
+        // 4. 执行决策
+        int[] bestMove = makeDecision();
+
+        // 5. 构建并返回着法
+        Move move;
+        if (bestMove != null && bestMove.length >= 2) {
+            move = new Move(bestMove[0], bestMove[1]);
+        } else {
+            // 安全回退：随机选择
+            move = fallbackMove();
+        }
+
+        // 6. 更新己方棋盘状态和路表
+        this.board.makeMove(move);
+        int pos1 = move.index1();
+        int pos2 = move.index2();
+        v1Board.updateCandidatesAfterMove(pos1);
+        if (pos2 >= 0) {
+            v1Board.updateCandidatesAfterMove(pos2);
+        }
+        // 更新路表
+        if (linesInitialized) {
+            v1Board.updateLinesAfterMove(pos1, myColor, myColor);
+            if (pos2 >= 0) {
+                v1Board.updateLinesAfterMove(pos2, myColor, myColor);
+            }
+        }
+
+        return move;
+    }
 
     /**
      * 核心决策逻辑（V2版本：集成α-β搜索 + 精细化威胁）
@@ -131,13 +185,6 @@ public class AI extends core.player.AI {
         if (threatEval.getCriticalThreatCount() > 0 && !defensePos.isEmpty()) {
             return createDefenseMove(defensePos);
         }
-        // 若评估出现异常（致命威胁但未给出防点），执行兜底的四连端点防守扫描
-        if (threatEval.getCriticalThreatCount() > 0 && defensePos.isEmpty()) {
-            List<Integer> fallbackDefs = findCriticalDefenseFallback();
-            if (!fallbackDefs.isEmpty()) {
-                return createDefenseMove(fallbackDefs);
-            }
-        }
 
         // 步骤2.5：【V2新增】检测对方复合威胁（双活三/冲四活三）
         int[] compoundDefense = detectCompoundThreat();
@@ -145,7 +192,7 @@ public class AI extends core.player.AI {
             return compoundDefense;
         }
 
-        // 步骤3：尝试威胁空间搜索（强制胜负链）
+        // 步骤3：威胁空间搜索（强制胜负链）
         int[] tbsMove = searchThreatSpace();
         if (tbsMove != null) {
             return tbsMove;
@@ -154,13 +201,17 @@ public class AI extends core.player.AI {
         // 步骤4：使用α-β搜索寻找最优着法
         if (USE_ALPHA_BETA && alphaBetaSearcher != null) {
             int[] searchMove = alphaBetaSearcher.search(myColor, oppColor);
+//            System.out.printf("nodes=%d, cutoffs=%d, rate=%.2f%n",
+//            alphaBetaSearcher.getNodeCount(),
+//            alphaBetaSearcher.getCutoffCount(),
+//            alphaBetaSearcher.getCutoffRate());
             if (searchMove != null) {
                 return searchMove;
             }
         }
 
         // 步骤5：回退到启发式着法生成
-        // 保守策略：威胁数≤2 时必须防守所有威胁
+        // 威胁数<=2时优先防守
         if (!defensePos.isEmpty() && threatEval.getThreatCount() <= 2) {
             return createDefenseMove(defensePos);
         }
@@ -175,47 +226,7 @@ public class AI extends core.player.AI {
     }
 
     /**
-     * 兜底防守：扫描对方在四方向的连续四子，返回其两端的立即空位作为防守点。
-     */
-    private List<Integer> findCriticalDefenseFallback() {
-        List<Integer> points = new java.util.ArrayList<>();
-        final int[] DX = {0, 1, 1, 1};
-        final int[] DY = {1, 0, 1, -1};
-        for (int idx = 0; idx < BOARD_SIZE * BOARD_SIZE; idx++) {
-            if (this.board.get(idx) != oppColor) continue;
-            int row = V1Board.toRow(idx);
-            int col = V1Board.toCol(idx);
-            for (int dir = 0; dir < 4; dir++) {
-                int count = 1;
-                int r = row + DX[dir], c = col + DY[dir];
-                while (V1Board.isValidPosition(r, c) && this.board.get(V1Board.toIndex(r, c)) == oppColor) {
-                    count++; r += DX[dir]; c += DY[dir];
-                }
-                int end1r = r, end1c = c; // 正向端点后的第一个非对方子
-                r = row - DX[dir]; c = col - DY[dir];
-                while (V1Board.isValidPosition(r, c) && this.board.get(V1Board.toIndex(r, c)) == oppColor) {
-                    count++; r -= DX[dir]; c -= DY[dir];
-                }
-                int end2r = r, end2c = c; // 反向端点后的第一个非对方子
-                if (count >= 4) {
-                    // 两端若为空则加入防守点
-                    if (V1Board.isValidPosition(end1r, end1c)) {
-                        int p = V1Board.toIndex(end1r, end1c);
-                        if (this.board.get(p) == PieceColor.EMPTY && !points.contains(p)) points.add(p);
-                    }
-                    if (V1Board.isValidPosition(end2r, end2c)) {
-                        int p = V1Board.toIndex(end2r, end2c);
-                        if (this.board.get(p) == PieceColor.EMPTY && !points.contains(p)) points.add(p);
-                    }
-                    if (points.size() >= 2) return points;
-                }
-            }
-        }
-        return points;
-    }
-
-    /**
-     * V3：威胁空间搜索入口
+     * 威胁空间搜索入口
      */
     private int[] searchThreatSpace() {
         if (!USE_THREAT_SPACE || threatSpaceSearcher == null) {
@@ -444,62 +455,13 @@ public class AI extends core.player.AI {
         this.board = new V1Board();
         this.v1Board = (V1Board) this.board;
         this.moveGenerator = new MoveGenerator(v1Board);
-        this.alphaBetaSearcher = new AlphaBetaSearcher(v1Board, moveGenerator);
-        this.threatSpaceSearcher = new ThreatSpaceSearcher(v1Board, moveGenerator);
+        this.transpositionTable = new TranspositionTable();
+        this.alphaBetaSearcher = new AlphaBetaSearcher(v1Board, moveGenerator, transpositionTable);
+        this.threatSpaceSearcher = new ThreatSpaceSearcher(v1Board, moveGenerator, transpositionTable);
         this.myColor = null;
         this.oppColor = null;
         this.isFirstMove = true;
         this.turnCount = 0;
         this.linesInitialized = false;
-    }
-
-    // 在 findNextMove 中统一记录最终决策（覆盖所有来源：开局库、胜着、防守、TBS、α-β、启发式）
-    @Override
-    public Move findNextMove(Move opponentMove) {
-        turnCount++;
-
-        // 处理对手着法
-        if (opponentMove != null) {
-            this.board.makeMove(opponentMove);
-            int pos1 = opponentMove.index1();
-            int pos2 = opponentMove.index2();
-            if (pos1 >= 0) {
-                v1Board.updateCandidatesAfterMove(pos1);
-            }
-            if (pos2 >= 0) {
-                v1Board.updateCandidatesAfterMove(pos2);
-            }
-            // 对手画像记录已移除
-        }
-
-        determineColor();
-        initOrUpdateLines(opponentMove);
-
-        int[] bestMove = makeDecision();
-
-        // 日志记录已移除
-
-        Move move;
-        if (bestMove != null && bestMove.length >= 2) {
-            move = new Move(bestMove[0], bestMove[1]);
-        } else {
-            move = fallbackMove();
-        }
-
-        this.board.makeMove(move);
-        int pos1 = move.index1();
-        int pos2 = move.index2();
-        v1Board.updateCandidatesAfterMove(pos1);
-        if (pos2 >= 0) {
-            v1Board.updateCandidatesAfterMove(pos2);
-        }
-        if (linesInitialized) {
-            v1Board.updateLinesAfterMove(pos1, myColor, myColor);
-            if (pos2 >= 0) {
-                v1Board.updateLinesAfterMove(pos2, myColor, myColor);
-            }
-        }
-
-        return move;
     }
 }
