@@ -32,8 +32,8 @@ public class MoveGenerator {
     /** 棋盘大小 */
     private static final int SIZE = V1Board.SIZE;
 
-    /** 最大候选着法数量（配合自适应上限对齐，避免过宽） */
-    private static final int MAX_CANDIDATES = 45; // 默认上限收紧
+    /** 最大候选着法数量（对齐 g06） */
+    private static final int MAX_CANDIDATES = 50;
 
     /** 位置分值表（中心高，边缘低） */
     private static final int[][] POSITION_SCORE = initPositionScore();
@@ -212,11 +212,10 @@ public class MoveGenerator {
         // 按分值降序排序
         scored.sort((a, b) -> b.score - a.score);
 
-            // 自适应限制候选数量（根据阶段与威胁压力）
-            int cap = computeAdaptiveCandidateCap();
-            if (scored.size() > cap) {
-                scored = scored.subList(0, cap);
-            }
+        // 对齐 g06：简单限制候选数量到 MAX_CANDIDATES
+        if (scored.size() > MAX_CANDIDATES) {
+            scored = scored.subList(0, MAX_CANDIDATES);
+        }
 
         return scored;
     }
@@ -250,66 +249,12 @@ public class MoveGenerator {
             score += board.evaluatePositionScore(pos, oppColor);
         }
 
-        // 2.5 棋型优先级加权：直接形成关键有效路的点强力加分；能阻断对方关键路的点也加分
-        Pattern myBest = board.getBestPatternAt(pos, myColor);
-        Pattern oppBest = board.getBestPatternAt(pos, oppColor);
-        switch (myBest) {
-            case LIVE_FOUR: score += 12000; break;
-            case RUSH_FOUR: score += 9000; break;
-            case LIVE_THREE: score += 4000; break;
-            default: break;
-        }
-        switch (oppBest) {
-            case LIVE_FOUR: score += 10000; break;
-            case RUSH_FOUR: score += 7000; break;
-            case LIVE_THREE: score += 3000; break;
-            default: break;
-        }
-
-        // 3. 形状/连接性与势：邻近己子越多、同路可延伸越多越好；开放端越多越佳
-        score += neighborFriendlyCount(pos, myColor) * 150;
-        score += routeActivity(pos, myColor) * 100;
-        score += openEndsPotential(pos, myColor) * 200;
+        // 对齐 g06：不做额外棋型/连接性/势的加权
 
         return score;
     }
 
-    /** 统计周围 8 邻域内己方棋子数量（粗略连接性）。 */
-    private int neighborFriendlyCount(int pos, PieceColor color) {
-        int r = V1Board.toRow(pos), c = V1Board.toCol(pos);
-        int cnt = 0;
-        for (int dr = -1; dr <= 1; dr++) {
-            for (int dc = -1; dc <= 1; dc++) {
-                if (dr == 0 && dc == 0) continue;
-                int nr = r + dr, nc = c + dc;
-                if (!V1Board.isValidPosition(nr, nc)) continue;
-                int idx = V1Board.toIndex(nr, nc);
-                if (board.get(idx) == color) cnt++;
-            }
-        }
-        return cnt;
-    }
-
-    /** 路活度：在该点关联的有效路条数（估势）。 */
-    private int routeActivity(int pos, PieceColor color) {
-        int active = 0;
-        for (Line ln : board.getValidLinesAt(pos)) {
-            if (ln.isValid()) active++;
-        }
-        return active;
-    }
-
-    /** 开放端潜力：统计通过该点在四向形成的两端开放可能（粗略）。 */
-    private int openEndsPotential(int pos, PieceColor color) {
-        int open = 0;
-        for (Line ln : board.getValidLinesAt(pos)) {
-            // 简化：若该路上已有己方连子且空位>0，则认为开放端潜力增加
-            if (ln.getMyCount() > 0 && ln.getEmptyCount() > 0) {
-                open++;
-            }
-        }
-        return open;
-    }
+    // 已移除：连接性/路活度/开放端潜力加权（对齐 g06）
 
     /**
      * 生成防守着法
@@ -355,7 +300,7 @@ public class MoveGenerator {
      */
     private List<int[]> generateOffensiveMoves(List<ScoredPosition> scoredPositions, PieceColor myColor) {
         List<int[]> moves = new ArrayList<>();
-        int n = Math.min(computeAdaptiveCandidateCap(), scoredPositions.size());
+        int n = Math.min(MAX_CANDIDATES, scoredPositions.size());
 
         // 组合高分位置
         for (int i = 0; i < n; i++) {
@@ -363,15 +308,8 @@ public class MoveGenerator {
                 int pos1 = scoredPositions.get(i).position;
                 int pos2 = scoredPositions.get(j).position;
                 if (board.isEmpty(pos1) && board.isEmpty(pos2)) {
-                    // 协同评分：尽量优先同一路或潜在双威胁组合
-                    int synergy = computePairSynergy(pos1, pos2, myColor);
-                    // 插入排序式加权放入前列（协同阈值同步收紧）
                     int[] mv = new int[] { pos1, pos2 };
-                    if (synergy > 6000 && moves.size() > 0) {
-                        moves.add(0, mv);
-                    } else {
-                        moves.add(mv);
-                    }
+                    moves.add(mv);
                     if (moves.size() >= MAX_CANDIDATES) {
                         return moves;
                     }
@@ -402,19 +340,7 @@ public class MoveGenerator {
         return Math.max(20, Math.min(cap, MAX_CANDIDATES));
     }
 
-    /**
-     * 粗略的双子协同评分：同一路优先，增量评估叠加作为次要依据。
-     */
-    private int computePairSynergy(int pos1, int pos2, PieceColor color) {
-        int s = 0;
-        for (Line ln : board.getValidLinesAt(pos1)) {
-            if (ln.containsPosition(pos2)) {
-                s += 6000; // 协同收紧，减少过度堆叠
-                break;
-            }
-        }
-        return s;
-    }
+    // 已移除：双子协同评分
 
     /**
      * 检查着法列表是否包含某着法

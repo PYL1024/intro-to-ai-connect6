@@ -188,18 +188,13 @@ public class PNSearcher {
             if (t1.hasDoubleFour() || t2.hasDoubleFour()) score += 140_000;
             if (t1.hasDoubleThree() || t2.hasDoubleThree()) score += 90_000;
             if (t1.isCriticalThreat() || t2.isCriticalThreat()) score += 250_000;
-            if (isSameLine(move[0], move[1])) score += 50_000;
+            // 已移除：同路协同加权
         }
         revert(move, color);
         return score;
     }
 
-    private boolean isSameLine(int p1, int p2) {
-        for (Line ln : board.getValidLinesAt(p1)) {
-            if (ln.containsPosition(p2)) return true;
-        }
-        return false;
-    }
+    // 已移除：同路协同检测
 
     private int pickPartner(int fixed, PieceColor color) {
         int best = -1, bestScore = Integer.MIN_VALUE;

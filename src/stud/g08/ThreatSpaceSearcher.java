@@ -22,13 +22,14 @@ public class ThreatSpaceSearcher {
     private static final int DEFAULT_MAX_DEPTH = 6;
 
     /** 默认时间预算（毫秒） */
-    private static final long DEFAULT_TIME_LIMIT_MS = 700L;
+    private static final long DEFAULT_TIME_LIMIT_MS = 1500L;
 
     /** 进攻候选着法上限，控制分支度 */
     private static final int ATTACK_MOVE_LIMIT = 10;
 
     /** 防守候选着法上限 */
     private static final int DEFENSE_MOVE_LIMIT = 6;
+
 
     /** 无穷大评分（用于立即获胜判断） */
     private static final int WIN_SCORE = 1_000_000;
@@ -95,8 +96,8 @@ public class ThreatSpaceSearcher {
         }
 
         // 先尝试 PN-search 在更紧的时间/节点预算下寻找必胜首手
-        long pnMs = Math.max(1L, timeLimitMs / 2);
-        int[] pnMove = pnSearcher.search(attackerColor, defenderColor, pnMs, 40_000);
+        long pnMs = Math.max(1L, timeLimitMs * 2 / 3);
+        int[] pnMove = pnSearcher.search(attackerColor, defenderColor, pnMs, 80_000);
         if (pnMove != null) {
             return pnMove;
         }
@@ -329,22 +330,14 @@ public class ThreatSpaceSearcher {
             if (t1.isCriticalThreat() || t2.isCriticalThreat()) {
                 score += 250_000;
             }
-            // 同路协同加权：两子在同一路上，提升威胁构造可信度
-            if (isSameLine(move[0], move[1])) {
-                score += 50_000;
-            }
+            // 已移除：同路协同加权
         }
 
         revertMove(move, color);
         return score;
     }
 
-    private boolean isSameLine(int p1, int p2) {
-        for (Line ln : board.getValidLinesAt(p1)) {
-            if (ln.containsPosition(p2)) return true;
-        }
-        return false;
-    }
+    // 已移除：同路协同检测
 
     /**
      * 落子并更新候选/路表，压栈状态以便回溯。

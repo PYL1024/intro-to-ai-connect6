@@ -40,7 +40,7 @@ public class AlphaBetaSearcher {
     private static final int DEFAULT_DEPTH = 8;
 
     /** 每步最大搜索时间（毫秒） */
-    private static final long MAX_TIME_MS = 500;
+    private static final long MAX_TIME_MS = 600;
 
     /** 最大候选着法数量（用于剪枝） */
     private static final int MAX_MOVES = 8;
@@ -100,6 +100,9 @@ public class AlphaBetaSearcher {
     /** 棋盘候选状态栈（用于精确回溯） */
     private Deque<V1Board.BoardState> stateStack;
 
+    /** 根节点快速威胁搜索（TSS） */
+    private final ThreatSpaceSearcher threatSpaceSearcher;
+
     /** 内部置换表（TT，含边界类型） */
     private final Map<Long, TTEntry> transpositionTable = new HashMap<>();
 
@@ -133,6 +136,7 @@ public class AlphaBetaSearcher {
         this.historyTable = new int[HISTORY_SIZE];
         this.pvTable = new int[MAX_DEPTH][2];
         this.stateStack = new ArrayDeque<>();
+        this.threatSpaceSearcher = new ThreatSpaceSearcher(board, moveGenerator);
     }
 
     /**
@@ -179,6 +183,13 @@ public class AlphaBetaSearcher {
         // 初始化 Zobrist 键（内部与共享TT）
         zobristKey = computeInitialInternalKey();
         sharedKey = sharedTT != null ? sharedTT.computeInitialKey(board) : 0L;
+
+        // 根节点快速 TSS：在 500ms 内尝试强制胜着
+        int[] tssMove = rootThreatSpaceSearch(myColor, oppColor);
+        if (tssMove != null) {
+            bestMove = tssMove;
+            return bestMove;
+        }
 
         // 迭代加深搜索（立志窗口）
         for (int depth = 2; depth <= DEFAULT_DEPTH; depth += 2) {
@@ -230,6 +241,48 @@ public class AlphaBetaSearcher {
     }
 
     /**
+     * 【局部快速搜索】在根节点固定第一子位置，仅为第二子做局部 α-β 搜索。
+     * 受限于根候选组合，通常更快更稳健。
+     * @param myColor 己方颜色
+     * @param oppColor 对方颜色
+     * @param fixedFirst 已确定的第一子位置
+     * @param depth 限制的最大搜索深度（偶数，建议4-6）
+     * @return 最佳着法（[fixedFirst, bestSecond]），若失败返回 null
+     */
+    public int[] searchWithForcedFirst(PieceColor myColor, PieceColor oppColor, int fixedFirst, int depth) {
+        this.myColor = myColor;
+        this.oppColor = oppColor;
+        this.startTime = System.currentTimeMillis();
+        this.timeout = false;
+        this.nodeCount = 0;
+        this.cutoffCount = 0;
+        this.bestMove = null;
+        this.stateStack.clear();
+
+        // 确保路表已构建
+        if (!board.isLinesBuilt()) {
+            board.buildLines(myColor);
+        }
+
+        // 初始化 Zobrist 键（内部与共享TT）
+        zobristKey = computeInitialInternalKey();
+        sharedKey = sharedTT != null ? sharedTT.computeInitialKey(board) : 0L;
+
+        int useDepth = Math.max(2, Math.min(depth, DEFAULT_DEPTH));
+
+        // 根节点受限：仅组合 fixedFirst 与高分位置
+        List<ScoredMove> rootMoves = generateOrderedMovesWithForcedFirst(myColor, oppColor, fixedFirst);
+        if (rootMoves.isEmpty()) return null;
+
+        // 立志窗口初始化
+        int alphaInit = -INF;
+        int betaInit = INF;
+
+        SearchResult res = searchAtDepthWithWindowRestricted(useDepth, alphaInit, betaInit, rootMoves);
+        return res.bestMove;
+    }
+
+    /**
      * 在指定深度进行搜索
      */
     private SearchResult searchAtDepthWithWindow(int depth, int alphaInit, int betaInit) {
@@ -264,6 +317,51 @@ public class AlphaBetaSearcher {
                 score = -alphaBeta(depth - 1, -alpha - 1, -alpha, oppColor, myColor, false, depth);
                 if (score > alpha && score < beta) {
                     // 重新搜索
+                    score = -alphaBeta(depth - 1, -beta, -alpha, oppColor, myColor, false, depth);
+                }
+            }
+
+            // 撤销落子
+            undoMove(move, myColor);
+
+            if (score > alpha) {
+                alpha = score;
+                best = move;
+            }
+        }
+
+        return new SearchResult(best, alpha);
+    }
+
+    /** 使用受限的根着法列表进行一层 α-β 搜索（PVS） */
+    private SearchResult searchAtDepthWithWindowRestricted(int depth, int alphaInit, int betaInit, List<ScoredMove> moves) {
+        if (moves == null || moves.isEmpty()) {
+            return new SearchResult(null, -INF);
+        }
+
+        int[] best = null;
+        int alpha = alphaInit;
+        int beta = betaInit;
+        boolean firstMove = true;
+
+        for (int idx = 0; idx < moves.size(); idx++) {
+            ScoredMove sm = moves.get(idx);
+            if (isTimeout()) {
+                break;
+            }
+
+            int[] move = sm.move;
+
+            // 模拟落子
+            makeMove(move, myColor);
+
+            int score;
+            if (firstMove) {
+                score = -alphaBeta(depth - 1, -beta, -alpha, oppColor, myColor, false, depth);
+                firstMove = false;
+            } else {
+                score = -alphaBeta(depth - 1, -alpha - 1, -alpha, oppColor, myColor, false, depth);
+                if (score > alpha && score < beta) {
                     score = -alphaBeta(depth - 1, -beta, -alpha, oppColor, myColor, false, depth);
                 }
             }
@@ -368,7 +466,7 @@ public class AlphaBetaSearcher {
             } else {
                 // LMR: 对非威胁且排序靠后的着法进行安全性降低（收紧触发与减深）
                 boolean isDefBlock = isDefensiveBlock(move, current, opponent);
-                boolean applyLMR = (depth >= 4) && (idx >= 4) && !isThreatMove(move, current) && !isDefBlock;
+                boolean applyLMR = (depth >= 5) && (idx >= 6) && !isThreatMove(move, current) && !isDefBlock;
                 if (applyLMR) {
                     int redDepth = Math.max(0, depth - 1 + extension);
                     score = -alphaBeta(redDepth, -alpha - 1, -alpha, opponent, current, !maximizing, ply + 1);
@@ -495,12 +593,8 @@ public class AlphaBetaSearcher {
             default:    basePosCap = isRoot ? Math.max(6, 10 - Math.max(0, ply - 2))  : 6;  break;
         }
 
-        // 时间压力调整
-        int timeLeftMs = (int) (MAX_TIME_MS - (System.currentTimeMillis() - startTime));
-        // 简易自适应调参：根据当前时间与统计（上一轮）微调位置/着法上限
-        double adjust = tuningAdjustment();
-        if (timeLeftMs < MAX_TIME_MS / 3) basePosCap = Math.max(4, basePosCap - 2);
-        if (threatPressure >= 3) basePosCap = Math.min(basePosCap + 2, candidates.size());
+        // 排序稳定化：去除基于时间与统计的动态调整，采用固定上限
+        double adjust = 1.0;
 
         List<ScoredPosition> positions = new ArrayList<>(Math.min(basePosCap, candidates.size()));
         int counted = 0;
@@ -535,7 +629,7 @@ public class AlphaBetaSearcher {
         positions.sort((a, b) -> b.score - a.score);
 
         // 限制位置数量用于组合
-        int dynamicPosLimit = Math.min(positions.size(), Math.max(4, (int)Math.round(basePosCap * adjust)));
+        int dynamicPosLimit = Math.min(positions.size(), basePosCap);
 
         // 组合成双子着法
         for (int i = 0; i < dynamicPosLimit; i++) {
@@ -551,14 +645,13 @@ public class AlphaBetaSearcher {
                     }
                 }
 
-                // 置换表主变着法加分
+                // 置换表主变着法加分（强化）
                 int[] ttMove = getTTMove();
                 if (ttMove != null && ((ttMove[0] == pos1 && ttMove[1] == pos2) || (ttMove[0] == pos2 && ttMove[1] == pos1))) {
-                    combinedScore += 7000;
+                    combinedScore += 15000;
                 }
 
-                // 双子协同加分：同一路或潜在双威胁
-                combinedScore += computePairSynergy(pos1, pos2, current);
+                // 已移除双子协同加分
 
                 scoredMoves.add(new ScoredMove(new int[]{pos1, pos2}, combinedScore));
             }
@@ -574,9 +667,7 @@ public class AlphaBetaSearcher {
             case MID:   baseMoveCap = 8;  break;
             default:    baseMoveCap = 6;  break;
         }
-        if (timeLeftMs < MAX_TIME_MS / 3) baseMoveCap = Math.max(4, baseMoveCap - 2);
-        if (threatPressure >= 3) baseMoveCap = Math.min(baseMoveCap + 2, scoredMoves.size());
-        baseMoveCap = (int)Math.round(baseMoveCap * adjust);
+        // 固定上限：不随时间或统计波动
         int moveLimit = Math.min(baseMoveCap, scoredMoves.size());
         return new ArrayList<>(scoredMoves.subList(0, moveLimit));
     }
@@ -618,6 +709,19 @@ public class AlphaBetaSearcher {
             bonus = (int) (bonus * 1.5);
         }
         return bonus;
+    }
+
+    /**
+     * 根节点威胁空间搜索（TSS）：短时强制胜着探测。
+     * 若 500ms 内找到不可挡威胁链，直接返回着法。
+     */
+    private int[] rootThreatSpaceSearch(PieceColor current, PieceColor opponent) {
+        if (current == null || opponent == null || threatSpaceSearcher == null) return null;
+        try {
+            return threatSpaceSearcher.searchForcingWin(current, opponent, Math.min(6, DEFAULT_DEPTH), 500L);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     /**
@@ -843,18 +947,57 @@ public class AlphaBetaSearcher {
         return res;
     }
 
-    private int computePairSynergy(int pos1, int pos2, PieceColor color) {
-        int synergy = 0;
-        // 同一路协同
-        List<Line> lines1 = board.getValidLinesAt(pos1);
-        for (Line ln : lines1) {
-            if (ln.containsPosition(pos2)) {
-                synergy += 6000;
-                break;
+    /** 根节点：固定第一子，仅为第二子组合与排序 */
+    private List<ScoredMove> generateOrderedMovesWithForcedFirst(PieceColor current, PieceColor opponent, int fixedFirst) {
+        List<ScoredMove> scoredMoves = new ArrayList<>();
+        List<Integer> candidates = board.getCandidatePositions();
+        if (!board.isEmpty(fixedFirst)) return scoredMoves;
+
+        // 根节点位置上限（与阶段相关）
+        int pieceCount = board.getPieceCount();
+        Phase phase = (pieceCount < 30) ? Phase.EARLY : (pieceCount < 80 ? Phase.MID : Phase.LATE);
+        int basePosCap = (phase == Phase.EARLY) ? 12 : (phase == Phase.MID ? 10 : 8);
+
+        // 防守压力（用于加权）
+        int threatPressure = 0;
+        try {
+            ThreatEvaluator te = moveGenerator.getThreatEvaluator();
+            te.getDefensePositions(opponent);
+            threatPressure = te.getCriticalThreatCount() * 2 + te.getThreatCount();
+        } catch (Exception ignored) { }
+
+        List<ScoredPosition> positions = new ArrayList<>(Math.min(basePosCap, candidates.size()));
+        for (int pos : candidates) {
+            if (pos == fixedFirst) continue;
+            if (!board.isEmpty(pos)) continue;
+            int score = board.evaluateMoveIncrement(pos, current);
+            int row = V1Board.toRow(pos);
+            int col = V1Board.toCol(pos);
+            score += MoveGenerator.getPositionScore(row, col);
+            score += historyTable[pos] / 10;
+            int defenseBonus = computeDefenseBonus(pos, current, opponent, true);
+            if (defenseBonus > 0) {
+                double amp = 1.0 + Math.min(1.0, threatPressure * 0.25);
+                defenseBonus = (int) (defenseBonus * amp);
             }
+            positions.add(new ScoredPosition(pos, score + defenseBonus));
+            if (positions.size() >= basePosCap) break;
         }
-        return synergy;
+
+        positions.sort((a, b) -> b.score - a.score);
+        int limit = Math.min(basePosCap, positions.size());
+        for (int i = 0; i < limit; i++) {
+            int pos2 = positions.get(i).position;
+            int combined = positions.get(i).score + (MoveGenerator.getPositionScore(V1Board.toRow(fixedFirst), V1Board.toCol(fixedFirst)));
+            scoredMoves.add(new ScoredMove(new int[] { fixedFirst, pos2 }, combined));
+        }
+        scoredMoves.sort((a, b) -> b.score - a.score);
+        // 限制数量以保证快速
+        int cap = Math.min(MAX_MOVES, scoredMoves.size());
+        return new ArrayList<>(scoredMoves.subList(0, cap));
     }
+
+    // 已移除：双子协同评分
 
     /**
      * 判断是否为防守封堵型着法：当前位置若由对手落子会形成高/致命威胁，则视为封堵

@@ -48,10 +48,10 @@ public class AI extends core.player.AI {
     private static final boolean USE_THREAT_SPACE = true;
 
     /** TBS搜索最大深度（以我方着法层计） */
-    private static final int TBS_MAX_DEPTH = 6;
+    private static final int TBS_MAX_DEPTH = 8;
 
     /** TBS默认时间预算（毫秒） */
-    private static final long TBS_DEFAULT_TIME_LIMIT_MS = 700;
+    private static final long TBS_DEFAULT_TIME_LIMIT_MS = 1500;
 
     // ===================== 成员变量 =====================
 
@@ -67,16 +67,10 @@ public class AI extends core.player.AI {
     /** 威胁空间搜索器 */
     private ThreatSpaceSearcher threatSpaceSearcher;
 
-    /** 蒙特卡洛树搜索器（MCTS） */
-    private MCTSSearcher mctsSearcher;
     /** 共享置换表（评估缓存） */
     private TranspositionTable transpositionTable;
 
-    /** 是否启用MCTS（策略可调整） */
-    private boolean useMCTS = true;
-    /** MCTS 时间预算（毫秒，策略可调整） */
-    private int mctsTimeLimitMs = 600;
-    /** TBS 时间预算（毫秒，可配置） */
+    /** TBS 时间预算（毫秒） */
     private long tbsTimeLimitMs = TBS_DEFAULT_TIME_LIMIT_MS;
     /** 当前策略ID（用于奖励反馈） */
     private int currentStrategyId = -1;
@@ -156,22 +150,18 @@ public class AI extends core.player.AI {
             return compoundDefense;
         }
 
-        // 步骤3：低优先级开局库（仅在早期且确认无紧急威胁时使用）
-        if (v1Board.getPieceCount() <= 8) {
-            // 再次确认无致命/高威胁，防止漏掉对手四连
-            ThreatEvaluator teEarly = moveGenerator.getThreatEvaluator();
-            List<Integer> defEarly = teEarly.getDefensePositions(oppColor);
-            if (teEarly.getCriticalThreatCount() > 0 || teEarly.getThreatCount() > 0) {
-                if (!defEarly.isEmpty()) return createDefenseMove(defEarly);
-                List<Integer> fb = findCriticalDefenseFallback();
-                if (!fb.isEmpty()) return createDefenseMove(fb);
-            } else {
-                int[] book = OpeningBook.pickOpeningMove(v1Board, myColor, turnCount);
-                if (book != null) {
-                    return book;
-                }
-            }
+        // 步骤2.7：严格规则——若存在连续四子且两端皆空，必须双端封堵（高优先级且仅限该威胁）
+        int[] strictPair = blockFourInSixPairStrict();
+        if (strictPair != null) {
+            return strictPair;
         }
+
+        // 步骤2.8：提升优先级——一般 4-in-6 单端/中间双空威胁，先固定第一子再择第二子（低于严格双端，高于 TBS）
+        int[] flexibleEarly = blockFourInSix();
+        if (flexibleEarly != null) {
+            return flexibleEarly;
+        }
+
 
         // 步骤3：尝试威胁空间搜索（强制胜负链）
         int[] tbsMove = searchThreatSpace();
@@ -189,11 +179,9 @@ public class AI extends core.player.AI {
             if (!fb.isEmpty()) return createDefenseMove(fb);
         }
 
-        // 步骤3.6：尝试MCTS（仿真评估）
-        int[] mctsMove = searchByMCTS();
-        if (mctsMove != null) {
-            return mctsMove;
-        }
+        // 已提升：一般 4-in-6 逻辑已提前处理
+
+        // 已移除：MCTS 阶段，时间全部留给 TBS 与 α-β
 
         // 步骤4：使用α-β搜索寻找最优着法
         if (USE_ALPHA_BETA && alphaBetaSearcher != null) {
@@ -272,13 +260,7 @@ public class AI extends core.player.AI {
         return threatSpaceSearcher.searchForcingWin(myColor, oppColor, TBS_MAX_DEPTH, tbsTimeLimitMs);
     }
 
-    /**
-     * MCTS 搜索入口：在时间预算内返回仿真收益最高的着法
-     */
-    private int[] searchByMCTS() {
-        if (!useMCTS || mctsSearcher == null) return null;
-        return mctsSearcher.search(myColor, oppColor, mctsTimeLimitMs);
-    }
+    // 已移除：MCTS 搜索入口
 
     /**
      * 【触发式补充】根据局面阶段扩展候选范围
@@ -361,6 +343,214 @@ public class AI extends core.player.AI {
         }
 
         return bestPos;
+    }
+
+    /**
+     * 全局扫描：若对方在任意长度为6的连续片段中已有4子且我方未阻断，选取最佳双点堵截。
+     */
+    private int[] blockFourInSix() {
+        final int[][] DIRS = { {0, 1}, {1, 0}, {1, 1}, {1, -1} };
+        int bestScorePair = -1;
+        int[] bestPair = null;
+        int bestScoreSingle = -1;
+        int bestSingle = -1;
+
+        for (int row = 0; row < BOARD_SIZE; row++) {
+            for (int col = 0; col < BOARD_SIZE; col++) {
+                for (int[] d : DIRS) {
+                    int endRow = row + d[0] * 5;
+                    int endCol = col + d[1] * 5;
+                    if (!V1Board.isValidPosition(endRow, endCol)) {
+                        continue; // 片段越界
+                    }
+
+                    // 收集该片段的颜色与索引
+                    PieceColor[] seg = new PieceColor[6];
+                    int[] idxs = new int[6];
+                    for (int k = 0; k < 6; k++) {
+                        int r = row + d[0] * k;
+                        int c = col + d[1] * k;
+                        seg[k] = v1Board.getColor(r, c);
+                        idxs[k] = V1Board.toIndex(r, c);
+                    }
+
+                    // 1) 优先：检测连续四子，若两端都为空（且不是我方子），双端必堵
+                    for (int start = 0; start <= 2; start++) {
+                        boolean fourRun = true;
+                        for (int t = 0; t < 4; t++) {
+                            if (seg[start + t] != oppColor) { fourRun = false; break; }
+                        }
+                        if (!fourRun) continue;
+                        int left = start - 1;
+                        int right = start + 4;
+                        if (left >= 0 && right < 6) {
+                            boolean endsEmpty = (seg[left] == PieceColor.EMPTY) && (seg[right] == PieceColor.EMPTY);
+                            boolean endsNotMine = (seg[left] != myColor) && (seg[right] != myColor);
+                            if (endsEmpty && endsNotMine) {
+                                int pA = idxs[left], pB = idxs[right];
+                                int score = evaluateDefensePair(pA, pB);
+                                if (score > bestScorePair) {
+                                    bestScorePair = score;
+                                    bestPair = new int[] { pA, pB };
+                                }
+                            }
+                        }
+                    }
+
+                    // 2) 次优：一般4/6威胁（含一端被我方堵或中间型），选择最佳单点封堵作为第一子
+                    int oppCount = 0, myCount = 0, emptyCount = 0;
+                    int[] empties = new int[2];
+                    for (int k = 0; k < 6; k++) {
+                        if (seg[k] == oppColor) oppCount++;
+                        else if (seg[k] == myColor) myCount++;
+                        else if (seg[k] == PieceColor.EMPTY) {
+                            if (emptyCount < 2) empties[emptyCount] = idxs[k];
+                            emptyCount++;
+                        }
+                    }
+                    if (oppCount == 4 && myCount <= 1 && emptyCount >= 1 && emptyCount <= 2) {
+                        int localBest = -1, localScore = -1;
+                        for (int i = 0; i < Math.min(emptyCount, 2); i++) {
+                            int candIdxInSeg = -1;
+                            for (int k = 0; k < 6; k++) { if (idxs[k] == empties[i]) { candIdxInSeg = k; break; } }
+                            int s = evaluateDefenseSingle(empties[i]);
+                            // 特例：两侧皆为对方子，中间为双空（opp,opp,EMPTY,EMPTY,opp,opp），鼓励在中间单点封堵
+                            boolean middleGapPair = (seg[0] == oppColor && seg[1] == oppColor && seg[2] == PieceColor.EMPTY && seg[3] == PieceColor.EMPTY && seg[4] == oppColor && seg[5] == oppColor);
+                            if (middleGapPair && (candIdxInSeg == 2 || candIdxInSeg == 3)) {
+                                s += 3000; // 轻微加分，保持低优先级性质
+                            }
+                            // 邻接偏好：若该端外侧紧邻是我方子，则降低优先级；若外侧不是我方子，则略微提高
+                            int outsideK = (candIdxInSeg == 0) ? -1 : (candIdxInSeg == 5 ? 6 : (candIdxInSeg < 3 ? -1 : 6));
+                            // 上述粗略判定不够精确，改用方向计算真实外侧邻居
+                            int outsideRow, outsideCol;
+                            if (candIdxInSeg == 0) {
+                                outsideRow = row - d[0]; outsideCol = col - d[1];
+                            } else if (candIdxInSeg == 5) {
+                                outsideRow = row + d[0] * 6; outsideCol = col + d[1] * 6;
+                            } else {
+                                outsideRow = Integer.MIN_VALUE; outsideCol = Integer.MIN_VALUE;
+                            }
+                            if (outsideRow != Integer.MIN_VALUE && V1Board.isValidPosition(outsideRow, outsideCol)) {
+                                PieceColor outside = v1Board.getColor(outsideRow, outsideCol);
+                                if (outside == myColor) s -= 5000; else s += 1000;
+                            }
+                            if (s > localScore) { localScore = s; localBest = empties[i]; }
+                        }
+                        if (localScore > bestScoreSingle) { bestScoreSingle = localScore; bestSingle = localBest; }
+                    }
+                }
+            }
+        }
+
+        // 若发现连续四子且两端皆空，强制双端堵住
+        if (bestPair != null) {
+            return bestPair;
+        }
+
+        // 否则，固定最佳单点为第一子，再以快速 α-β 选择第二子
+        if (bestSingle >= 0) {
+            int second = -1;
+            if (alphaBetaSearcher != null) {
+                int[] picked = alphaBetaSearcher.searchWithForcedFirst(myColor, oppColor, bestSingle, 4);
+                if (picked != null && picked.length >= 2) {
+                    second = (picked[0] == bestSingle) ? picked[1] : picked[0];
+                }
+            }
+            if (second < 0) {
+                second = findBestAttackPosition(bestSingle);
+            }
+            if (second >= 0) {
+                return new int[] { bestSingle, second };
+            }
+            // fallback: 任意其他空位
+            for (int pos : v1Board.getCandidatePositions()) {
+                if (pos != bestSingle && v1Board.isEmpty(pos)) {
+                    return new int[] { bestSingle, pos };
+                }
+            }
+            return new int[] { bestSingle, bestSingle }; // 极端兜底
+        }
+
+        return null;
+    }
+
+    /**
+     * 严格双端封堵：仅当存在对方连续四子且两端皆为空（且非我方子）时返回两端防守对。
+     * 其他情况不做处理（交由主逻辑）。
+     */
+    private int[] blockFourInSixPairStrict() {
+        final int[][] DIRS = { {0, 1}, {1, 0}, {1, 1}, {1, -1} };
+        int bestScorePair = -1;
+        int[] bestPair = null;
+
+        for (int row = 0; row < BOARD_SIZE; row++) {
+            for (int col = 0; col < BOARD_SIZE; col++) {
+                for (int[] d : DIRS) {
+                    int endRow = row + d[0] * 5;
+                    int endCol = col + d[1] * 5;
+                    if (!V1Board.isValidPosition(endRow, endCol)) continue;
+
+                    PieceColor[] seg = new PieceColor[6];
+                    int[] idxs = new int[6];
+                    for (int k = 0; k < 6; k++) {
+                        int r = row + d[0] * k;
+                        int c = col + d[1] * k;
+                        seg[k] = v1Board.getColor(r, c);
+                        idxs[k] = V1Board.toIndex(r, c);
+                    }
+                    // 检测连续四子，双端为空
+                    for (int start = 0; start <= 2; start++) {
+                        boolean fourRun = true;
+                        for (int t = 0; t < 4; t++) {
+                            if (seg[start + t] != oppColor) { fourRun = false; break; }
+                        }
+                        if (!fourRun) continue;
+                        int left = start - 1;
+                        int right = start + 4;
+                        if (left >= 0 && right < 6) {
+                            boolean endsEmpty = (seg[left] == PieceColor.EMPTY) && (seg[right] == PieceColor.EMPTY);
+                            boolean endsNotMine = (seg[left] != myColor) && (seg[right] != myColor);
+                            // 额外约束：两端外侧紧邻也不得为我方子，否则不强制双端堵
+                            boolean outsideOk = true;
+                            int outLeftRow = row + d[0] * (left - 1);
+                            int outLeftCol = col + d[1] * (left - 1);
+                            int outRightRow = row + d[0] * (right + 1);
+                            int outRightCol = col + d[1] * (right + 1);
+                            if (V1Board.isValidPosition(outLeftRow, outLeftCol)) {
+                                if (v1Board.getColor(outLeftRow, outLeftCol) == myColor) outsideOk = false;
+                            }
+                            if (V1Board.isValidPosition(outRightRow, outRightCol)) {
+                                if (v1Board.getColor(outRightRow, outRightCol) == myColor) outsideOk = false;
+                            }
+                            if (endsEmpty && endsNotMine && outsideOk) {
+                                int pA = idxs[left], pB = idxs[right];
+                                int score = evaluateDefensePair(pA, pB);
+                                if (score > bestScorePair) {
+                                    bestScorePair = score;
+                                    bestPair = new int[] { pA, pB };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return bestPair;
+    }
+
+    /**
+     * 评估双防守点价值，综合位置分与己方/对方增量。
+     */
+    private int evaluateDefensePair(int posA, int posB) {
+        if (posA == posB) return Integer.MIN_VALUE;
+        return evaluateDefenseSingle(posA) + evaluateDefenseSingle(posB);
+    }
+
+    private int evaluateDefenseSingle(int pos) {
+        int incMine = v1Board.evaluateMoveIncrement(pos, myColor);
+        int incOpp = v1Board.evaluateMoveIncrement(pos, oppColor);
+        int positional = MoveGenerator.getPositionScore(V1Board.toRow(pos), V1Board.toCol(pos));
+        return incMine * 2 + incOpp + positional;
     }
 
     /**
@@ -504,9 +694,6 @@ public class AI extends core.player.AI {
         // 策略选择（多臂轮换）
         StrategyManager.Selection sel = StrategyManager.pickStrategyForNewGame();
         this.currentStrategyId = sel.id;
-        this.useMCTS = sel.strategy.useMCTS;
-        this.mctsTimeLimitMs = sel.strategy.mctsTimeMs;
-        this.mctsSearcher = new MCTSSearcher(v1Board, moveGenerator, transpositionTable);
         this.myColor = null;
         this.oppColor = null;
         this.turnCount = 0;
